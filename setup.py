@@ -6,5 +6,4 @@ yet upgraded.
 """
 from setuptools import setup
 
-
 setup()

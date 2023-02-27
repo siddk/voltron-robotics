@@ -1,23 +1,45 @@
-# Voltron
+<div align="center">
+    <img src="docs/assets/voltron-banner.png" alt="Voltron Logo"/>
+</div>
 
-> *Voltron*: Language-Driven Representation Learning for Robotics – Python package with code for loading pretrained models & pretraining Voltron, R3M, and MVP from scratch.
+<div align="center">
 
-Package repository for Voltron: Language-Driven Representation Learning for Robotics.
+[![arXiv](https://img.shields.io/badge/arXiv-2302.12766-df2a2a.svg?style=for-the-badge)](https://arxiv.org/abs/2302.12766)
+[![PyTorch](https://img.shields.io/badge/PyTorch-1.12.0-EE4C2C.svg?style=for-the-badge&logo=pytorch)](https://pytorch.org/get-started/previous-versions/#v1120)
+[![Code Style: Black](https://img.shields.io/badge/Code%20Style-Black-000000?style=for-the-badge)](https://github.com/psf/black)
+[![Ruff](https://img.shields.io/badge/%E2%9A%A1%EF%B8%8F-Ruff-orange?style=for-the-badge)](https://github.com/charliermarsh/ruff)
+![License](https://img.shields.io/github/license/siddk/lila?color=blueviolet&style=for-the-badge)
 
-Built with [PyTorch](https://pytorch.org/), using sane quality defaults (`black`, `ruff`, `pre-commit`).
+</div>
 
 ---
 
-## Installation
+# Language-Driven Representation Learning for Robotics
 
-This repository is built on top of PyTorch; while specified as a dependency for the package, we highly recommend that
-you install the desired version of PyTorch (e.g., with accelerator support) for your given hardware and dependency
-manager (e.g., `conda`). Otherwise, the default installed version be incompatible.
+Package repository for Voltron: Language-Driven Representation Learning for Robotics. Provides code for loading
+pretrained Voltron, R3M, and MVP representations for adaptation to downstream tasks, as well as code for pretraining
+such representations on arbitrary datasets.
+
+---
+
+## Quickstart
+
+This repository is built with PyTorch; while specified as a dependency for the package, we highly recommend that
+you install the desired version (e.g., with accelerator support) for your given hardware and environment
+manager (e.g., `conda`).
 
 PyTorch installation instructions [can be found here](https://pytorch.org/get-started/locally/). This repository
-requires PyTorch >= 1.12, but has only been thoroughly tested with PyTorch 1.12.0, Torchvision 0.13.0, Torchaudio 0.12.0.
+should work with PyTorch >= 1.12, but has only been thoroughly tested with PyTorch 1.12.0, Torchvision 0.13.0,
+Torchaudio 0.12.0.
 
-Once PyTorch has been properly installed, you can install this package locally via an editable installation:
+Once PyTorch has been properly installed, you can install this package via PyPI, and you're off!
+
+```bash
+pip install voltron-robotics
+```
+
+You can also install this package locally via an editable installation in case you want to run examples/extend the
+current functionality:
 
 ```bash
 git clone https://github.com/siddk/voltron-robotics
@@ -27,12 +49,89 @@ pip install -e .
 
 ## Usage
 
-Project-specific usage notes...
+Voltron Robotics (package: `voltron`) is structured to provide easy access to pretrained Voltron models (and
+reproductions), to facilitate use for various downstream tasks. Using a pretrained Voltron model is easy:
+
+```python
+from torchvision.io import read_image
+from voltron import instantiate_extractor, load
+
+# Load a frozen Voltron (V-Cond) model & configure a vector extractor
+vcond, preprocess = load("v-cond", device="cuda", freeze=True)
+vector_extractor = instantiate_extractor(vcond)()
+
+# Obtain & Preprocess an image =>> can be from a dataset, or camera on a robot, etc.
+#   => Feel free to add any language if you have it (Voltron models work either way!)
+img = preprocess(read_image("examples/img/peel-carrot-initial.png"))[None, ...].to("cuda")
+lang = ["peeling a carrot"]
+
+# Extract both multimodal AND vision-only embeddings!
+multimodal_embeddings = vcond(img, lang, mode="multimodal")
+visual_embeddings = vcond(img, mode="visual")
+
+# Use the `vector_extractor` to output dense vector representations for downstream applications!
+#   => Pass this representation to model of your choice (object detector, control policy, etc.)
+representation = vector_extractor(multimodal_embeddings)
+```
+
+Voltron representations can be used for a variety of different applications; in the
+[`voltron-evaluation`](https://github.com/siddk/voltron-evaluation) repository, you can find code for adapting Voltron
+representations to various downstream tasks (segmentation, object detection, control, etc.); all the applications from
+our paper.
+
+---
+
+## API
+
+![Voltron Framework](docs/assets/voltron-framework.png)
+
+The package `voltron` provides the following functionality for using and adapting existing representations:
+
+#### `voltron.available_models()`
+
+Returns the name of available Voltron models; right now, the following models (all models trained in the paper) are
+available:
+
+- `v-cond` – V-Cond (ViT-Small) trained on Sth-Sth; single-frame w/ language-conditioning.
+- `v-dual` – V-Dual (ViT-Small) trained on Sth-Sth; dual-frame w/ language-conditioning.
+- `v-gen` – V-Gen (ViT-Small) trained on Sth-Sth; dual-frame w/ language conditioning AND generation.
+- `r-mvp` – R-MVP (ViT-Small); reproduction of [MVP](https://github.com/ir413/mvp) trained on Sth-Sth.
+- `r-r3m-vit` – R-R3M (ViT-Small); reproduction of [R3M](https://github.com/facebookresearch/r3m) trained on Sth-Sth.
+- `r-r3m-rn50` – R-R3M (ResNet-50); reproduction of [R3M](https://github.com/facebookresearch/r3m) trained on Sth-Sth.
+- `v-cond-base` – V-Cond (ViT-Base) trained on Sth-Sth; larger (86M parameter) variant of V-Cond.
+
+#### `voltron.load(name: str, device: str, freeze: bool, cache: str = cache/)`
+
+Returns the model and the Torchvision Transform needed by the model, where `name` is one of the strings returned
+by `voltron.available_models()`; this in general follows the same API as
+[OpenAI's CLIP](https://github.com/openai/CLIP).
+
+---
+
+Voltron models (`v-{cond, dual, gen, ...}`) returned by `voltron.load()` support the following:
+
+#### model(img: Tensor, lang: Optional[List[str]], mode: str = "multimodal")
+
+Returns a sequence of embeddings corresponding to the output of the multimodal encoder; note that `lang` can be None,
+which is totally fine for Voltron models! However, if you have any language (even a coarse task description), it'll
+probably be helpful!
+
+The parameter `mode` in `["multimodal", "visual"]` controls whether the output will contain the fused image patch and
+language embeddings, or only the image patch embeddings.
+
+**Note:** For the API for the non-Voltron models (e.g., R-MVP, R-R3M), take a look at
+[`examples/verify.py`](examples/verify.py); this file shows how representations from *every* model can be extracted.
+
+### Adaptation
+
+See [`examples/adapt.py`](examples/adapt.py) and the [`voltron-evaluation`](https://github.com/siddk/voltron-evaluation)
+repository for more examples on the various ways to adapt/use Voltron representations.
+
+---
 
 ## Contributing
 
-Before committing to the repository, *make sure to set up your dev environment!*
-
+Before committing to the repository, make sure to set up your dev environment!
 Here are the basic development environment setup guidelines:
 
 + Fork/clone the repository, performing an editable installation. Make sure to install with the development dependencies
@@ -45,8 +144,8 @@ Here are the basic development environment setup guidelines:
 Additional Contribution Notes:
 - This project has migrated to the recommended
   [`pyproject.toml` based configuration for setuptools](https://setuptools.pypa.io/en/latest/userguide/quickstart.html).
-  However, given that several tools have not fully adopted [PEP 660](https://peps.python.org/pep-0660/), we provide a
-  [`setup.py` file for backwards compatibility](https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html).
+  However, as some tools haven't yet adopted [PEP 660](https://peps.python.org/pep-0660/), we provide a
+  [`setup.py` file](https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html).
 
 - This package follows the [`flat-layout` structure](https://setuptools.pypa.io/en/latest/userguide/package_discovery.html#flat-layout)
   described in `setuptools`.
@@ -59,13 +158,13 @@ Additional Contribution Notes:
 
 High-level overview of repository/project file-tree:
 
-+ `docs/` - Package documentation - including project roadmap, additional notes (if any).
-+ `voltron` - Package source code; has all core utilities for model specification, loading,
-                               preprocessing, etc.
-+ `scripts/` - Standalone scripts for various functionality (e.g., training).
-+ `.gitignore` - Default Python `.gitignore`.
++ `docs/` - Package documentation & assets - including project roadmap.
++ `voltron` - Package source code; has all core utilities for model specification, loading, feature extraction,
+              preprocessing, etc.
++ `examples/` - Standalone examples scripts for demonstrating various functionality (e.g., extracting different types
+                of representations, adapting representations in various contexts, pretraining, amongst others).
 + `.pre-commit-config.yaml` - Pre-commit configuration file (sane defaults + `black` + `ruff`).
-+ `LICENSE` - By default, research code is made available under the MIT License; if changing, think carefully about why!
++ `LICENSE` - Code is made available under the MIT License.
 + `Makefile` - Top-level Makefile (by default, supports linting - checking & auto-fix); extend as needed.
 + `pyproject.toml` - Following PEP 621, this file has all project configuration details (including dependencies), as
                      well as tool configurations (for `black` and `ruff`).

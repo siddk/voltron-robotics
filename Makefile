@@ -9,9 +9,9 @@ help:
 	@echo "    Run code styling (black, ruff) and update in place - committing with pre-commit also does this."
 
 check:
-	ruff check --show-source .
 	black --check .
+	ruff check --show-source .
 
 autoformat:
-	ruff check --fix --show-fixes .
 	black .
+	ruff check --fix --show-fixes .

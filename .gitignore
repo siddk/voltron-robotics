@@ -134,3 +134,6 @@ dmypy.json
 
 # Mac OS
 .DS_Store
+
+# Cache
+cache/

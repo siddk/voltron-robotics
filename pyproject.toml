@@ -3,15 +3,15 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "voltron"
+name = "voltron-robotics"
 authors = [
     {name = "Siddharth Karamcheti", email="skaramcheti@cs.stanford.edu"}
 ]
-description = "Voltron: Language-Driven Representation Learning for Robotics – Python package with code for loading pretrained models & pretraining Voltron, R3M, and MVP from scratch."
+description = "Voltron: Language-Driven Representation Learning for Robotics."
 version = "0.0.1"
 readme = "README.md"
 requires-python = ">=3.8"
-keywords = ["machine learning"]
+keywords = ["robotics", "representation learning", "natural language processing", "machine learning"]
 license = {file = "LICENSE"}
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -28,9 +28,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "gdown",
+    "einops",
     "torch",
     "torchvision",
     "torchaudio",
+    "transformers",
 ]
 
 [project.optional-dependencies]
@@ -54,3 +57,11 @@ preview = true
 [tool.ruff]
 line-length = 121
 target-version = "py38"
+select = ["A", "B", "C90", "E", "F", "I", "RUF", "W"]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["E402", "F401"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["cache"]
