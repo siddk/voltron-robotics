@@ -110,7 +110,7 @@ by `voltron.available_models()`; this in general follows the same API as
 
 Voltron models (`v-{cond, dual, gen, ...}`) returned by `voltron.load()` support the following:
 
-#### model(img: Tensor, lang: Optional[List[str]], mode: str = "multimodal")
+#### `model(img: Tensor, lang: Optional[List[str]], mode: str = "multimodal")`
 
 Returns a sequence of embeddings corresponding to the output of the multimodal encoder; note that `lang` can be None,
 which is totally fine for Voltron models! However, if you have any language (even a coarse task description), it'll
