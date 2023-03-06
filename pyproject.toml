@@ -28,8 +28,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "av",
     "gdown",
     "einops",
+    "hurry.filesize",
+    "hydra-core==1.1.1", # Lock Hydra =>> future versions break...
+    "omegaconf==2.1.2",  # Lock OmegaConf =>> future versions break...
+    "opencv-python==4.2.0.32",  # Lock OpenCV =>> just in case...
     "torch",
     "torchvision",
     "torchaudio",
