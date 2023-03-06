@@ -16,7 +16,7 @@ from omegaconf import MISSING
 class DatasetConfig:
     name: str = MISSING
     path: str = MISSING
-    artifact_path: str = to_absolute_path("/mnt/home")
+    artifact_path: str = to_absolute_path("data/processed/sth-sth-v2")
 
     # Dataset-Specific Parameters
     resolution: int = 224
