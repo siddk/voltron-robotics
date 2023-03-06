@@ -1,5 +1,5 @@
 <div align="center">
-    <img src="docs/assets/voltron-banner.png" alt="Voltron Logo"/>
+    <img src="https://github.com/siddk/voltron-robotics/blob/main/docs/assets/voltron-banner.png" alt="Voltron Logo"/>
 </div>
 
 <div align="center">
@@ -83,7 +83,7 @@ our paper.
 
 ## API
 
-![Voltron Framework](docs/assets/voltron-framework.png)
+![Voltron Framework](https://github.com/siddk/voltron-robotics/blob/main/docs/assets/voltron-framework.png)
 
 The package `voltron` provides the following functionality for using and adapting existing representations:
 
