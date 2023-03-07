@@ -80,7 +80,7 @@ def get_online_transform(dataset: str, model_arch: str, normalization: Tuple[Any
     """Defines an `online` transform to be applied *when batching the images* (during training/validation)."""
     if dataset == "sth-sth-v2":
         # Note: R3M does *not* expect normalized 0-1 (then ImageNet normalized) images --> drop the identity.
-        if model_arch == "r3m":
+        if model_arch in {"v-r3m", "v-rn3m"}:
             return Compose([Lambda(identity)])
         else:
             return Compose([ConvertImageDtype(torch.float), Normalize(mean=normalization[0], std=normalization[1])])

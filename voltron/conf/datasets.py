@@ -18,6 +18,10 @@ class DatasetConfig:
     path: str = MISSING
     artifact_path: str = to_absolute_path("data/processed/sth-sth-v2")
 
+    # Streaming Parameters (assumes fully preprocessed dataset lives at `stream_prefix/...`)
+    stream: bool = True
+    stream_prefix: str = "data/processed"
+
     # Dataset-Specific Parameters
     resolution: int = 224
     normalization: Tuple[Any, Any] = MISSING

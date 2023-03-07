@@ -9,4 +9,4 @@ To get things to work, we had to add some non-intuitive code to facilitate PyTor
 data parallel training pipeline). As a result, `xpretrain.py` is here mostly for documentation purposes, with a fully
 refactored version `pretrain.py` forthcoming.
 
-We also include the original cloud preprocesssing script `xpreprocess.py` for completeness.
+We also include the original cloud preprocessing script `xpreprocess.py` for completeness (this is more general).

@@ -191,7 +191,7 @@ class RN3M50Config(ResNet3MConfig):
 # VCond -- Single Frame + Language Conditioning
 @dataclass
 class VCondConfig(ModelConfig):
-    arch: str = "vcond"
+    arch: str = "v-cond"
     identifier: str = MISSING
 
     # Dataset Modality
@@ -280,7 +280,7 @@ class VCondBaseConfig(VCondConfig):
 # VDual - Dual Frame (0th Frame + Kth frame) + Language Conditioning
 @dataclass
 class VDualConfig(ModelConfig):
-    arch: str = "vdual"
+    arch: str = "v-dual"
     identifier: str = MISSING
 
     # Dataset Modality
@@ -346,7 +346,7 @@ class VDualSmallConfig(VDualConfig):
 # VGen - Dual Frame with Language Conditioning AND Language Generation
 @dataclass
 class VGenConfig(ModelConfig):
-    arch: str = "vgen"
+    arch: str = "v-gen"
     identifier: str = MISSING
 
     # Dataset Modality
