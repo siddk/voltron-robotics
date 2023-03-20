@@ -94,6 +94,9 @@ class VDual(nn.Module):
         self.encoder_embed_dim, self.encoder_n_heads = encoder_embed_dim, encoder_n_heads
         self.decoder_embed_dim, self.decoder_n_heads = decoder_embed_dim, decoder_n_heads
 
+        # General Parameters (for downstream adaptation)
+        self.embed_dim, self.n_heads = self.encoder_embed_dim, self.encoder_n_heads
+
         # MAE Encoder Parameters --> No CLS Token!
         self.patch2embed = PatchEmbed(
             self.resolution, self.patch_size, self.encoder_embed_dim, in_channels=self.in_channels
