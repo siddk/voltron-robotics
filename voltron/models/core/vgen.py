@@ -168,8 +168,6 @@ class VGen(nn.Module):
         # VGen -- Add "Image" and "Language" Modifier Tokens for Encoder & Decoder...
         self.img_enc_token = nn.Parameter(torch.zeros(1, 1, 1, self.encoder_embed_dim))
         self.lang_enc_token = nn.Parameter(torch.zeros(1, 1, self.encoder_embed_dim))
-        self.img_dec_token = nn.Parameter(torch.zeros(1, 1, 1, self.decoder_embed_dim))
-        self.lang_dec_token = nn.Parameter(torch.zeros(1, 1, self.decoder_embed_dim))
 
         # VGen -- Learnable "ctx" position embeddings --> initialize via `randn` following original ViT & @lucidrains
         #   =>> Ref: https://github.com/lucidrains/vit-pytorch/blob/main/vit_pytorch/vit.py#L99
@@ -216,8 +214,6 @@ class VGen(nn.Module):
         nn.init.normal_(self.mask_token, std=0.02)
         nn.init.normal_(self.img_enc_token, std=0.02)
         nn.init.normal_(self.lang_enc_token, std=0.02)
-        nn.init.normal_(self.img_dec_token, std=0.02)
-        nn.init.normal_(self.lang_dec_token, std=0.02)
 
         # Everything else...
         self.apply(self.transformer_initializer)

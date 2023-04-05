@@ -140,3 +140,6 @@ dmypy.json
 
 # Cache
 cache/
+
+# Scratch
+scratch/
