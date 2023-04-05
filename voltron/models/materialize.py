@@ -35,7 +35,7 @@ MODEL_REGISTRY = {
     },
     "v-gen": {
         "config": "18-mUBDsr-2_-KrGoL2E2YzjcUO8JOwUF",
-        "checkpoint": "1T2yfUynlRHPQTXavD2BBR23B1VH2mi3x",
+        "checkpoint": "1TzSQpKVKBWKCSvYJf22c45hrKczTQz24",
         "cls": VGen,
     },
     # === Voltron ViT-Base Model ===
