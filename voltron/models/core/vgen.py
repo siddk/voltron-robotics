@@ -352,9 +352,8 @@ class VGen(nn.Module):
         :return: [1, k] Tensor of LM probabilities given imgs.
         """
         # Blank out the "encoder" language --> just [<CLS> = 101, 0 ...]
-        blank_lang, blank_lang_mask = torch.zeros(1, self.max_lang_len, dtype=torch.int64), torch.zeros(
-            1, self.max_lang_len, dtype=torch.int64
-        )
+        blank_lang= torch.zeros(1, self.max_lang_len, dtype=torch.int64, device=imgs.device)
+        blank_lang_mask = torch.zeros(1, self.max_lang_len, dtype=torch.int64, device=imgs.device)
         blank_lang[0][0], blank_lang_mask[0][0] = 101, 1
 
         # === Encoder Forward ===
