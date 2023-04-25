@@ -37,7 +37,7 @@ from voltron.util import CheckpointSaver, Metrics, ResumeableDistributedSampler,
 # Set Defaults (Hydra w/ Structured Configs)
 DEFAULTS = [
     "_self_",
-    {"model": "v-gen-base"},
+    {"model": "v-cond"},
     {"dataset": "sth-sth-v2"},
     {"accelerator": "torchrun"},
     {"tracking": "voltron-tracking"},
