@@ -124,7 +124,7 @@ language embeddings, or only the image patch embeddings.
 
 ### Adaptation
 
-See [`examples/adapt.py`](examples/adapt.py) and the [`voltron-evaluation`](https://github.com/siddk/voltron-evaluation)
+See [`examples/usage.py`](examples/usage.py) and the [`voltron-evaluation`](https://github.com/siddk/voltron-evaluation)
 repository for more examples on the various ways to adapt/use Voltron representations.
 
 ---

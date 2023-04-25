@@ -60,6 +60,7 @@ class VGen(nn.Module):
         mlp_ratio: float = 4.0,
         in_channels: int = 3,
         norm_pixel_loss: bool = True,
+        use_cls_token: bool = False,
         eps: float = 1e-8,
     ) -> None:
         """
@@ -93,6 +94,7 @@ class VGen(nn.Module):
         :param mlp_ratio: Ratio for embedding size to Position-wise FeedForward MLP (gets shrunk back down).
         :param in_channels: Default number of channels in the base image -- almost always 3.
         :param norm_pixel_loss: Normalize decoder pixel targets for reconstruction (better perf, not interpretable).
+        :param use_cls_token: Add <CLS> token for continued pretraining (NOTE: not used in MAE pretraining/finetuning!)
         :param eps: Epsilon for preventing divide by zero.
         """
         super().__init__()
@@ -102,6 +104,7 @@ class VGen(nn.Module):
         self.lr, self.base_lr, self.min_lr, self.effective_bsz = None, base_lr, min_lr, effective_bsz
         self.mae_weight, self.lm_weight, self.language_dim = mae_weight, lm_weight, language_dim
         self.max_lang_len, self.vocab_size = max_lang_len, vocab_size
+        self.use_cls_token = use_cls_token
         self.warmup_epochs, self.max_epochs = warmup_epochs, max_epochs
 
         # Encoder/Decoder Parameters
@@ -112,12 +115,17 @@ class VGen(nn.Module):
         # General Parameters (for downstream adaptation)
         self.embed_dim, self.n_heads = self.encoder_embed_dim, self.encoder_n_heads
 
-        # MAE Encoder Parameters --> No CLS Token!
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, self.encoder_embed_dim))
+
+        # MAE Encoder Parameters
         self.patch2embed = PatchEmbed(
             self.resolution, self.patch_size, self.encoder_embed_dim, in_channels=self.in_channels
         )
         self.encoder_pe = nn.Parameter(
-            torch.zeros(1, self.patch2embed.num_patches, self.encoder_embed_dim), requires_grad=False
+            torch.zeros(1, self.patch2embed.num_patches + (1 if self.use_cls_token else 0), self.encoder_embed_dim),
+            requires_grad=False,
         )
         self.encoder_blocks = nn.ModuleList(
             [
@@ -141,12 +149,11 @@ class VGen(nn.Module):
         # Projection from Encoder to Decoder
         self.encoder2decoder = nn.Linear(self.encoder_embed_dim, self.decoder_embed_dim)
 
-        # MAE Decoder Parameters -- Remember the MASK Token!
+        # MAE Decoder Parameters -- Remember the CLS Token (if specified)!
         self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, self.decoder_embed_dim))
-
-        # Decoder PE has to be aware of both patches and language, since injecting new mask tokens...
         self.decoder_pe = nn.Parameter(
-            torch.zeros(1, self.patch2embed.num_patches, self.decoder_embed_dim), requires_grad=False
+            torch.zeros(1, self.patch2embed.num_patches + (1 if self.use_cls_token else 0), self.decoder_embed_dim),
+            requires_grad=False,
         )
         self.decoder_blocks = nn.ModuleList(
             [
@@ -202,9 +209,13 @@ class VGen(nn.Module):
 
     def initialize_weights(self) -> None:
         # Position Encoding -- Fixed 2D Sine-Cosine Embeddings
-        enc_pe = get_2D_position_embeddings(self.encoder_embed_dim, int(self.patch2embed.num_patches**0.5))
+        enc_pe = get_2D_position_embeddings(
+            self.encoder_embed_dim, int(self.patch2embed.num_patches**0.5), cls_token=self.use_cls_token
+        )
         self.encoder_pe.data.copy_(torch.from_numpy(enc_pe).float().unsqueeze(0))
-        dec_pe = get_2D_position_embeddings(self.decoder_embed_dim, int(self.patch2embed.num_patches**0.5))
+        dec_pe = get_2D_position_embeddings(
+            self.decoder_embed_dim, int(self.patch2embed.num_patches**0.5), cls_token=self.use_cls_token
+        )
         self.decoder_pe.data.copy_(torch.from_numpy(dec_pe).float().unsqueeze(0))
 
         # Initialize PatchEmbedding as a Linear...
@@ -214,6 +225,8 @@ class VGen(nn.Module):
         nn.init.normal_(self.mask_token, std=0.02)
         nn.init.normal_(self.img_enc_token, std=0.02)
         nn.init.normal_(self.lang_enc_token, std=0.02)
+        if self.use_cls_token:
+            nn.init.normal_(self.cls_token, std=0.02)
 
         # Everything else...
         self.apply(self.transformer_initializer)
@@ -316,7 +329,7 @@ class VGen(nn.Module):
 
         # Patchify, broadcast position embedding across ctx_len (0 + K) dimension, unfold, add `ctx_enc_pe` embeddings!
         patches = self.patch2embed(rearrange(imgs, "bsz ctx channels res1 res2 -> (bsz ctx) channels res1 res2"))
-        patches_pe = patches + self.encoder_pe
+        patches_pe = patches + (self.encoder_pe[:, 1:, :] if self.use_cls_token else self.encoder_pe)
         ctx_patches = rearrange(patches_pe, "(bsz ctx) seq embed -> bsz ctx seq embed", ctx=2)
         ctx_patches_pe = ctx_patches + self.ctx_enc_pe[:, :2, ...]
 
@@ -326,6 +339,12 @@ class VGen(nn.Module):
             projected_language + self.lang_enc_token,
         )
         img_embeddings = rearrange(img_ctx_embeddings, "bsz ctx seq embed -> bsz (ctx seq) embed")
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            cls_token_pe = self.cls_token + self.encoder_pe[:, :1, :] + self.img_enc_token[:, 0, :, :]
+            cls_tokens = cls_token_pe.expand(imgs.shape[0], -1, -1)
+            img_embeddings = torch.cat([cls_tokens, img_embeddings], dim=1)
 
         # Create "dummy" visible mask, concatenate image patches & language, feed to Transformer
         patches_mask = torch.ones_like(img_embeddings[..., -1], dtype=lang_mask.dtype)
@@ -337,8 +356,15 @@ class VGen(nn.Module):
             multimodal_embeddings = block(multimodal_embeddings, multimodal_mask)
         multimodal_embeddings = self.encoder_norm(multimodal_embeddings)
 
-        # Return the full sequence of multimodal embeddings (but ignore 0th frame)...
-        return multimodal_embeddings[:, self.patch2embed.num_patches :]
+        # Return the full sequence of multimodal embeddings (but ignore 0th frame) => the `~` denote what to remove!
+        #   => [CLS] + ~[n_patches x 0th frame]~ + [n_patches x Kth frame] + [max_lang_len language]
+        #   => ~[n_patches x 0th frame]~ + [n_patches x Kth frame] + [max_lang_len language]
+        if self.use_cls_token:
+            return torch.cat(
+                [multimodal_embeddings[:, :1, :], multimodal_embeddings[:, 1 + self.patch2embed.num_patches :, :]], dim=1
+            )
+        else:
+            return multimodal_embeddings[:, self.patch2embed.num_patches :]
 
     def score(self, imgs: torch.Tensor, langs: torch.Tensor, lang_masks: torch.Tensor) -> torch.Tensor:
         """
@@ -352,9 +378,8 @@ class VGen(nn.Module):
         :return: [1, k] Tensor of LM probabilities given imgs.
         """
         # Blank out the "encoder" language --> just [<CLS> = 101, 0 ...]
-        blank_lang, blank_lang_mask = torch.zeros(1, self.max_lang_len, dtype=torch.int64), torch.zeros(
-            1, self.max_lang_len, dtype=torch.int64
-        )
+        blank_lang = torch.zeros(1, self.max_lang_len, dtype=torch.int64, device=imgs.device)
+        blank_lang_mask = torch.zeros(1, self.max_lang_len, dtype=torch.int64, device=imgs.device)
         blank_lang[0][0], blank_lang_mask[0][0] = 101, 1
 
         # === Encoder Forward ===
@@ -363,7 +388,7 @@ class VGen(nn.Module):
 
         # Patchify, broadcast position embedding across ctx_len (0 + K) dimension, unfold, add `ctx_enc_pe` embeddings!
         patches = self.patch2embed(rearrange(imgs, "bsz ctx channels res1 res2 -> (bsz ctx) channels res1 res2"))
-        patches_pe = patches + self.encoder_pe
+        patches_pe = patches + (self.encoder_pe[:, 1:, :] if self.use_cls_token else self.encoder_pe)
         ctx_patches = rearrange(patches_pe, "(bsz ctx) seq embed -> bsz ctx seq embed", ctx=2)
         ctx_patches_pe = ctx_patches + self.ctx_enc_pe[:, :2, ...]
 
@@ -373,6 +398,12 @@ class VGen(nn.Module):
             projected_language + self.lang_enc_token,
         )
         img_embeddings = rearrange(img_ctx_embeddings, "bsz ctx seq embed -> bsz (ctx seq) embed")
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            cls_token_pe = self.cls_token + self.encoder_pe[:, :1, :] + self.img_enc_token[:, 0, :, :]
+            cls_tokens = cls_token_pe.expand(imgs.shape[0], -1, -1)
+            img_embeddings = torch.cat([cls_tokens, img_embeddings], dim=1)
 
         # Create "dummy" visible mask, concatenate image patches & language, feed to Transformer
         patches_mask = torch.ones_like(img_embeddings[..., -1], dtype=blank_lang_mask.dtype)
@@ -384,27 +415,37 @@ class VGen(nn.Module):
             multimodal_embeddings = block(multimodal_embeddings, multimodal_mask)
         multimodal_embeddings = self.encoder_norm(multimodal_embeddings)
 
-        # Split multimodal embedding, remove language, and return only the 0th + Kth frame patches
-        enc_ctx_patches = rearrange(
-            multimodal_embeddings[:, : -blank_lang_mask.shape[-1], ...],
-            "bsz (ctx seq) embed -> bsz ctx seq embed",
-            ctx=2,
-        )
+        # Split multimodal embedding, remove language, and return only the (CLS +) 0th + Kth frame patches
+        enc_patches = multimodal_embeddings[:, : -blank_lang_mask.shape[-1], ...]
 
         # === Encoder =>> Decoder Hand-Off ===
-        enc_patches = repeat(enc_ctx_patches, "b ctx seq embed -> (bsz b) ctx seq embed", bsz=langs.size(0))
-
-        # Get token embeddings -- *NOT CONTEXTUAL* -- for the lang_gen tokens...
+        enc_patches = repeat(enc_patches, "b cseq embed -> (bsz b) cseq embed", bsz=langs.size(0))
         lang_gen_embeddings = self.embed_language(langs)
 
         # === Decoder Forward ===
-        projected_ctx_patches = self.encoder2decoder(enc_patches)
+        projected_patches = self.encoder2decoder(enc_patches)
         projected_lang_gen = self.lang2decoder(lang_gen_embeddings)
 
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            projected_ctx_patches = rearrange(
+                projected_patches[:, 1:, :], "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2
+            )
+        else:
+            projected_ctx_patches = rearrange(projected_patches, "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2)
+
         # Add position embeddings, `ctx_dec_pe` embeddings, and flatten patches for Transformer...
-        decoder_ctx_patches_pe = projected_ctx_patches + self.decoder_pe[None, ...]
+        decoder_ctx_patches_pe = projected_ctx_patches + (
+            self.decoder_pe[None, ...] if not self.use_cls_token else self.decoder_pe[None, :, 1:, :]
+        )
         decoder_ctx_patches = decoder_ctx_patches_pe + self.ctx_dec_pe[:, :2, ...]
         decoder_patches = rearrange(decoder_ctx_patches, "bsz ctx seq embed -> bsz (ctx seq) embed")
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            # Add back <CLS> Token from `projected_patches[:, :1, :]`
+            cls_embedding = projected_patches[:, :1, :] + self.decoder_pe[:, :1, :]
+            decoder_patches = torch.cat([cls_embedding, decoder_patches], dim=1)
 
         # Add language -> create "mask" by multiply padding by self.prefix_mask
         decoder_patches_mask = torch.ones_like(decoder_patches[..., -1], dtype=lang_masks.dtype)
@@ -442,9 +483,14 @@ class VGen(nn.Module):
         lang_con_mask: torch.Tensor,
         mask_ratio: Optional[float] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        lang_embeddings = self.encode_language(lang_con, lang_con_mask)
+        projected_lang = self.lang2encoder(lang_embeddings)
+
+        # Reshape image context to apply masking *identically*
+
         # Patchify, broadcast position embedding across ctx_len (0 + K) dimension, unfold, add `ctx_enc_pe` embeddings!
         patches = self.patch2embed(rearrange(img_ctx, "bsz ctx channels res1 res2 -> (bsz ctx) channels res1 res2"))
-        patches_pe = patches + self.encoder_pe
+        patches_pe = patches + (self.encoder_pe if not self.use_cls_token else self.encoder_pe[:, 1:, :])
         ctx_patches = rearrange(patches_pe, "(bsz ctx) seq embed -> bsz ctx seq embed", ctx=2)
         ctx_patches_pe = ctx_patches + self.ctx_enc_pe[:, :2, ...]
 
@@ -452,8 +498,14 @@ class VGen(nn.Module):
         visible_ctx_patches, mask, restore_idxs = self.mask(ctx_patches_pe, mask_ratio)
 
         # Add "modality" embeddings to patches & language & flatten out context patches...
-        visible_ctx_patches, lang = visible_ctx_patches + self.img_enc_token, lang_con + self.lang_enc_token
+        visible_ctx_patches, lang = visible_ctx_patches + self.img_enc_token, projected_lang + self.lang_enc_token
         visible_patches = rearrange(visible_ctx_patches, "bsz ctx seq embed -> bsz (ctx seq) embed")
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            cls_token_pe = self.cls_token + self.encoder_pe[:, :1, :] + self.img_enc_token[:, 0, :, :]
+            cls_tokens = cls_token_pe.expand(img_ctx.shape[0], -1, -1)
+            visible_patches = torch.cat([cls_tokens, visible_patches], dim=1)
 
         # Create "dummy" visible mask, concatenate image patches & language, feed to Transformer...
         visible_mask = torch.ones_like(visible_patches[..., -1], dtype=lang_con_mask.dtype)
@@ -465,38 +517,58 @@ class VGen(nn.Module):
             multimodal_embedding = block(multimodal_embedding, multimodal_mask)
         multimodal_embedding = self.encoder_norm(multimodal_embedding)
 
-        # Split multimodal embedding, remove language, and return only the visible ctx (0th + Kth frame) patches!
-        visible_ctx_patches = rearrange(
-            multimodal_embedding[:, : -lang_con_mask.shape[-1], ...], "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2
-        )
-        return visible_ctx_patches, mask, restore_idxs
+        # Split multimodal embedding, remove language, return the visible ctx (0th + Kth frame) patches (+ <CLS>)!
+        visible_patches = multimodal_embedding[:, : -lang_con_mask.shape[-1], ...]
+        return visible_patches, mask, restore_idxs
 
     def forward_decoder(
         self,
-        visible_ctx_patches: torch.Tensor,
+        visible_patches: torch.Tensor,
         restore_idxs: torch.Tensor,
         lang_gen: torch.Tensor,
         lang_gen_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Project patches & lang_gen into decoder embedding dimension (visible_ctx_patches :: [bsz, 2, seq, enc_embed])
-        projected_ctx_patches = self.encoder2decoder(visible_ctx_patches)
+        # Project patches & lang_gen into decoder dimension (visible_patches :: [bsz, (CLS) + 2 * seq, enc_embed])
+        projected_patches = self.encoder2decoder(visible_patches)
         projected_lang_gen = self.lang2decoder(lang_gen)
+        visible_per_frame = (projected_patches.shape[1] - (1 if self.use_cls_token else 0)) // 2
 
         # Add Mask Tokens to Sequence and Unshuffle
-        mask_tokens = self.mask_token.repeat(
-            projected_ctx_patches.shape[0], 2, restore_idxs.shape[1] - visible_ctx_patches.shape[2], 1
-        )
-        concatenated_ctx_patches = torch.cat([projected_ctx_patches, mask_tokens], dim=2)
-        unshuffled_ctx_patches = torch.gather(
-            concatenated_ctx_patches,
-            dim=2,
-            index=restore_idxs[:, None, ..., None].repeat(1, 2, 1, self.decoder_embed_dim),
-        )
+        mask_tokens = self.mask_token.repeat(projected_patches.shape[0], 2, restore_idxs.shape[1] - visible_per_frame, 1)
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            # Remove CLS Token as part of "unshuffling"
+            projected_ctx_patches = rearrange(
+                projected_patches[:, 1:, :], "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2
+            )
+            no_cls_concatenated_ctx_patches = torch.cat([projected_ctx_patches, mask_tokens], dim=2)
+            unshuffled_ctx_patches = torch.gather(
+                no_cls_concatenated_ctx_patches,
+                dim=2,
+                index=restore_idxs[:, None, ..., None].repeat(1, 2, 1, self.decoder_embed_dim),
+            )
+        else:
+            projected_ctx_patches = rearrange(projected_patches, "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2)
+            concatenated_ctx_patches = torch.cat([projected_ctx_patches, mask_tokens], dim=2)
+            unshuffled_ctx_patches = torch.gather(
+                concatenated_ctx_patches,
+                dim=2,
+                index=restore_idxs[:, None, ..., None].repeat(1, 2, 1, self.decoder_embed_dim),
+            )
 
         # Add position embeddings, `ctx_dec_pe` embeddings, and flatten patches for Transformer...
-        decoder_ctx_patches_pe = unshuffled_ctx_patches + self.decoder_pe[None, ...]
+        decoder_ctx_patches_pe = unshuffled_ctx_patches + (
+            self.decoder_pe[None, ...] if not self.use_cls_token else self.decoder_pe[None, :, 1:, :]
+        )
         decoder_ctx_patches = decoder_ctx_patches_pe + self.ctx_dec_pe[:, :2, ...]
         decoder_patches = rearrange(decoder_ctx_patches, "bsz ctx seq embed -> bsz (ctx seq) embed")
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            # Add back <CLS> Token from `projected_patches[:, :1, :]`
+            cls_embedding = projected_patches[:, :1, :] + self.decoder_pe[:, :1, :]
+            decoder_patches = torch.cat([cls_embedding, decoder_patches], dim=1)
 
         # Add language -> create "mask" by multiply padding by self.prefix_mask
         decoder_patches_mask = torch.ones_like(decoder_patches[..., -1], dtype=lang_gen_mask.dtype)
@@ -512,8 +584,11 @@ class VGen(nn.Module):
         multimodal_embedding = self.decoder_norm(multimodal_embedding)
 
         # Split multimodal embedding into patches and language...
+        patches_ctx = multimodal_embedding[:, : -lang_gen_mask.shape[-1], ...]
         patches = rearrange(
-            multimodal_embedding[:, : -lang_gen_mask.shape[-1], ...], "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2
+            patches_ctx if not self.use_cls_token else patches_ctx[:, 1:, :],
+            "bsz (ctx seq) embed -> bsz ctx seq embed",
+            ctx=2,
         )
         lang = multimodal_embedding[:, -lang_gen_mask.shape[-1] :, ...]
 
@@ -592,8 +667,7 @@ class VGen(nn.Module):
                 f"lang_example_loss: {lang_example_loss.isnan().any()} -- "
                 f"lang_loss: {lang_loss.isnan().any()}"
             )
-            import os
-            os._exit(0)
+            exit(1)
             # fmt: on
 
         # Compute weighted loss...
@@ -625,14 +699,7 @@ class VGen(nn.Module):
         :return: Tuple of losses and intermediates, as follows:
             > (combined loss, reconstruction loss, lm loss, [reconstruction loss per frame in {0, K}])
         """
-        # First, get precomputed language embeddings & project to encoder_embed_dim; language only used in encoder!
-        lang_embeddings = self.encode_language(lang_con, lang_con_mask)
-        projected_language = self.lang2encoder(lang_embeddings)
-
-        # Reshape image context to apply masking *identically*
-        visible_ctx_patches, mask, restore_idxs = self.forward_encoder(
-            imgs, projected_language, lang_con_mask, mask_ratio
-        )
+        visible_ctx_patches, mask, restore_idxs = self.forward_encoder(imgs, lang_con, lang_con_mask, mask_ratio)
 
         # Get token embeddings -- *NOT CONTEXTUAL* -- for the lang_gen tokens...
         lang_gen_embeddings = self.embed_language(lang_gen)

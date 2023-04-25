@@ -52,6 +52,7 @@ class VDual(nn.Module):
         mlp_ratio: float = 4.0,
         in_channels: int = 3,
         norm_pixel_loss: bool = True,
+        use_cls_token: bool = False,
     ) -> None:
         """
         Initialize a VDual model with the requisite architecture parameters.
@@ -80,6 +81,7 @@ class VDual(nn.Module):
         :param mlp_ratio: Ratio for embedding size to Position-wise FeedForward MLP (gets shrunk back down).
         :param in_channels: Default number of channels in the base image -- almost always 3.
         :param norm_pixel_loss: Normalize decoder pixel targets for reconstruction (better perf, not interpretable).
+        :param use_cls_token: Add <CLS> token for continued pretraining (NOTE: not used in MAE pretraining/finetuning!)
         """
         super().__init__()
         self.resolution, self.patch_size, self.mask_ratio = resolution, patch_size, mask_ratio
@@ -87,6 +89,7 @@ class VDual(nn.Module):
         self.optimizer, self.schedule, self.betas, self.weight_decay = optimizer, schedule, betas, weight_decay
         self.lr, self.base_lr, self.min_lr, self.effective_bsz = None, base_lr, min_lr, effective_bsz
         self.warmup_epochs, self.max_epochs = warmup_epochs, max_epochs
+        self.use_cls_token = use_cls_token
         self.language_dim = language_dim
 
         # Encoder/Decoder Parameters
@@ -97,12 +100,17 @@ class VDual(nn.Module):
         # General Parameters (for downstream adaptation)
         self.embed_dim, self.n_heads = self.encoder_embed_dim, self.encoder_n_heads
 
-        # MAE Encoder Parameters --> No CLS Token!
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, self.encoder_embed_dim))
+
+        # MAE Encoder Parameters
         self.patch2embed = PatchEmbed(
             self.resolution, self.patch_size, self.encoder_embed_dim, in_channels=self.in_channels
         )
         self.encoder_pe = nn.Parameter(
-            torch.zeros(1, self.patch2embed.num_patches, self.encoder_embed_dim), requires_grad=False
+            torch.zeros(1, self.patch2embed.num_patches + (1 if self.use_cls_token else 0), self.encoder_embed_dim),
+            requires_grad=False,
         )
         self.encoder_blocks = nn.ModuleList(
             [
@@ -125,10 +133,11 @@ class VDual(nn.Module):
         # Projection from Encoder to Decoder
         self.encoder2decoder = nn.Linear(self.encoder_embed_dim, self.decoder_embed_dim)
 
-        # MAE Decoder Parameters -- Remember the MASK Token!
+        # MAE Decoder Parameters -- Remember the CLS Token (if specified)!
         self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, self.decoder_embed_dim))
         self.decoder_pe = nn.Parameter(
-            torch.zeros(1, self.patch2embed.num_patches, self.decoder_embed_dim), requires_grad=False
+            torch.zeros(1, self.patch2embed.num_patches + (1 if self.use_cls_token else 0), self.decoder_embed_dim),
+            requires_grad=False,
         )
         self.decoder_blocks = nn.ModuleList(
             [
@@ -175,9 +184,13 @@ class VDual(nn.Module):
 
     def initialize_weights(self) -> None:
         # Position Encoding -- Fixed 2D Sine-Cosine Embeddings
-        enc_pe = get_2D_position_embeddings(self.encoder_embed_dim, int(self.patch2embed.num_patches**0.5))
+        enc_pe = get_2D_position_embeddings(
+            self.encoder_embed_dim, int(self.patch2embed.num_patches**0.5), cls_token=self.use_cls_token
+        )
         self.encoder_pe.data.copy_(torch.from_numpy(enc_pe).float().unsqueeze(0))
-        dec_pe = get_2D_position_embeddings(self.decoder_embed_dim, int(self.patch2embed.num_patches**0.5))
+        dec_pe = get_2D_position_embeddings(
+            self.decoder_embed_dim, int(self.patch2embed.num_patches**0.5), cls_token=self.use_cls_token
+        )
         self.decoder_pe.data.copy_(torch.from_numpy(dec_pe).float().unsqueeze(0))
 
         # Initialize PatchEmbedding as a Linear...
@@ -187,6 +200,8 @@ class VDual(nn.Module):
         nn.init.normal_(self.mask_token, std=0.02)
         nn.init.normal_(self.img_token, std=0.02)
         nn.init.normal_(self.lang_token, std=0.02)
+        if self.use_cls_token:
+            nn.init.normal_(self.cls_token, std=0.02)
 
         # Everything else...
         self.apply(self.transformer_initializer)
@@ -281,13 +296,19 @@ class VDual(nn.Module):
 
         # Patchify, broadcast position embedding ctx_len (0 + K) dimension, unfold, add `ctx_enc_pe` embeddings!
         patches = self.patch2embed(rearrange(imgs, "bsz ctx channels res1 res2 -> (bsz ctx) channels res1 res2"))
-        patches_pe = patches + self.encoder_pe
+        patches_pe = patches + (self.encoder_pe[:, 1:, :] if self.use_cls_token else self.encoder_pe)
         ctx_patches = rearrange(patches_pe, "(bsz ctx) seq embed -> bsz ctx seq embed", ctx=2)
         ctx_patches_pe = ctx_patches + self.ctx_enc_pe[:, :2, ...]
 
         # Add "modality" embeddings to patches & language & flatten out context patches...
         img_ctx_embeddings, lang_embeddings = ctx_patches_pe + self.img_token, projected_language + self.lang_token
         img_embeddings = rearrange(img_ctx_embeddings, "bsz ctx seq embed -> bsz (ctx seq) embed")
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            cls_token_pe = self.cls_token + self.encoder_pe[:, :1, :] + self.img_token[:, 0, :, :]
+            cls_tokens = cls_token_pe.expand(imgs.shape[0], -1, -1)
+            img_embeddings = torch.cat([cls_tokens, img_embeddings], dim=1)
 
         # Create "dummy" visible mask, concatenate image patches & language, feed to Transformer
         patches_mask = torch.ones_like(img_embeddings[..., -1], dtype=lang_mask.dtype)
@@ -299,15 +320,25 @@ class VDual(nn.Module):
             multimodal_embeddings = block(multimodal_embeddings, multimodal_mask)
         multimodal_embeddings = self.encoder_norm(multimodal_embeddings)
 
-        # Return the full sequence of multimodal embeddings (but ignore 0th frame)...
-        return multimodal_embeddings[:, self.patch2embed.num_patches :]
+        # Return the full sequence of multimodal embeddings (but ignore 0th frame) => the `~` denote what to remove!
+        #   => [CLS] + ~[n_patches x 0th frame]~ + [n_patches x Kth frame] + [max_lang_len language]
+        #   => ~[n_patches x 0th frame]~ + [n_patches x Kth frame] + [max_lang_len language]
+        if self.use_cls_token:
+            return torch.cat(
+                [multimodal_embeddings[:, :1, :], multimodal_embeddings[:, 1 + self.patch2embed.num_patches :, :]], dim=1
+            )
+        else:
+            return multimodal_embeddings[:, self.patch2embed.num_patches :]
 
     def forward_encoder(
         self, img_ctx: torch.Tensor, lang: torch.Tensor, lang_mask: torch.Tensor, mask_ratio: Optional[float] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        lang_embeddings = self.encode_language(lang, lang_mask)
+        projected_lang = self.lang2encoder(lang_embeddings)
+
         # Patchify, broadcast position embedding across ctx_len (0 + K) dimension, unfold, add `ctx_enc_pe` embeddings!
         patches = self.patch2embed(rearrange(img_ctx, "bsz ctx channels res1 res2 -> (bsz ctx) channels res1 res2"))
-        patches_pe = patches + self.encoder_pe
+        patches_pe = patches + (self.encoder_pe if not self.use_cls_token else self.encoder_pe[:, 1:, :])
         ctx_patches = rearrange(patches_pe, "(bsz ctx) seq embed -> bsz ctx seq embed", ctx=2)
         ctx_patches_pe = ctx_patches + self.ctx_enc_pe[:, :2, ...]
 
@@ -315,8 +346,14 @@ class VDual(nn.Module):
         visible_ctx_patches, mask, restore_idxs = self.mask(ctx_patches_pe, mask_ratio)
 
         # Add "modality" embeddings to patches & language & flatten out context patches...
-        visible_ctx_patches, lang = visible_ctx_patches + self.img_token, lang + self.lang_token
+        visible_ctx_patches, lang = visible_ctx_patches + self.img_token, projected_lang + self.lang_token
         visible_patches = rearrange(visible_ctx_patches, "bsz ctx seq embed -> bsz (ctx seq) embed")
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            cls_token_pe = self.cls_token + self.encoder_pe[:, :1, :] + self.img_token[:, 0, :, :]
+            cls_tokens = cls_token_pe.expand(img_ctx.shape[0], -1, -1)
+            visible_patches = torch.cat([cls_tokens, visible_patches], dim=1)
 
         # Create "dummy" visible mask, concatenate image patches & language, feed to Transformer...
         visible_mask = torch.ones_like(visible_patches[..., -1], dtype=lang_mask.dtype)
@@ -328,39 +365,60 @@ class VDual(nn.Module):
             multimodal_embedding = block(multimodal_embedding, multimodal_mask)
         multimodal_embedding = self.encoder_norm(multimodal_embedding)
 
-        # Split multimodal embedding, remove language, and return only the visible ctx (0th + Kth frame) patches!
-        visible_ctx_patches = rearrange(
-            multimodal_embedding[:, : -lang_mask.shape[-1], ...], "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2
-        )
-        return visible_ctx_patches, mask, restore_idxs
+        # Split multimodal embedding, remove language, return the visible ctx (0th + Kth frame) patches (+ <CLS>)!
+        visible_patches = multimodal_embedding[:, : -lang_mask.shape[-1], ...]
+        return visible_patches, mask, restore_idxs
 
-    def forward_decoder(self, visible_ctx_patches: torch.Tensor, restore_idxs: torch.Tensor) -> torch.Tensor:
-        # Project patches into decoder embedding dimension (visible_ctx_patches :: [bsz, 2, seq, enc_embed])
-        projected_ctx_patches = self.encoder2decoder(visible_ctx_patches)
+    def forward_decoder(self, visible_patches: torch.Tensor, restore_idxs: torch.Tensor) -> torch.Tensor:
+        # Project patches into decoder embedding dimension (visible_ctx_patches :: [bsz, (CLS) + 2 * seq, enc_embed])
+        projected_patches = self.encoder2decoder(visible_patches)
+        visible_per_frame = (projected_patches.shape[1] - (1 if self.use_cls_token else 0)) // 2
 
         # Add Mask Tokens to Sequence and Unshuffle
-        mask_tokens = self.mask_token.repeat(
-            projected_ctx_patches.shape[0], 2, restore_idxs.shape[1] - visible_ctx_patches.shape[2], 1
-        )
-        concatenated_ctx_patches = torch.cat([projected_ctx_patches, mask_tokens], dim=2)
-        unshuffled_ctx_patches = torch.gather(
-            concatenated_ctx_patches,
-            dim=2,
-            index=restore_idxs[:, None, ..., None].repeat(1, 2, 1, self.decoder_embed_dim),
-        )
+        mask_tokens = self.mask_token.repeat(projected_patches.shape[0], 2, restore_idxs.shape[1] - visible_per_frame, 1)
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            # Remove CLS Token as part of "unshuffling"
+            projected_ctx_patches = rearrange(
+                projected_patches[:, 1:, :], "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2
+            )
+            no_cls_concatenated_ctx_patches = torch.cat([projected_ctx_patches, mask_tokens], dim=2)
+            unshuffled_ctx_patches = torch.gather(
+                no_cls_concatenated_ctx_patches,
+                dim=2,
+                index=restore_idxs[:, None, ..., None].repeat(1, 2, 1, self.decoder_embed_dim),
+            )
+        else:
+            projected_ctx_patches = rearrange(projected_patches, "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2)
+            concatenated_ctx_patches = torch.cat([projected_ctx_patches, mask_tokens], dim=2)
+            unshuffled_ctx_patches = torch.gather(
+                concatenated_ctx_patches,
+                dim=2,
+                index=restore_idxs[:, None, ..., None].repeat(1, 2, 1, self.decoder_embed_dim),
+            )
 
         # Add position embeddings, `ctx_dec_pe` embeddings, and flatten patches for Transformer...
-        decoder_ctx_patches_pe = unshuffled_ctx_patches + self.decoder_pe[None, ...]
+        decoder_ctx_patches_pe = unshuffled_ctx_patches + (
+            self.decoder_pe[None, ...] if not self.use_cls_token else self.decoder_pe[None, :, 1:, :]
+        )
         decoder_ctx_patches = decoder_ctx_patches_pe + self.ctx_dec_pe[:, :2, ...]
         decoder_patches = rearrange(decoder_ctx_patches, "bsz ctx seq embed -> bsz (ctx seq) embed")
+
+        # (Optional) <CLS> Token Handling
+        if self.use_cls_token:
+            # Add back <CLS> Token from `projected_patches[:, :1, :]`
+            cls_embedding = projected_patches[:, :1, :] + self.decoder_pe[:, :1, :]
+            decoder_patches = torch.cat([cls_embedding, decoder_patches], dim=1)
 
         # Apply Transformer Blocks...
         for block in self.decoder_blocks:
             decoder_patches = block(decoder_patches)
         decoder_patches = self.decoder_norm(decoder_patches)
 
-        # Run final projection & return "unflattened" patches
-        reconstructions = self.decoder_prediction(decoder_patches)
+        # Run final projection & return "unflattened" patches --> note <CLS> token handling!
+        decoder_prediction = self.decoder_prediction(decoder_patches)
+        reconstructions = decoder_prediction if not self.use_cls_token else decoder_prediction[:, 1:, :]
         return rearrange(reconstructions, "bsz (ctx seq) embed -> bsz ctx seq embed", ctx=2)
 
     def patchify(self, imgs: torch.Tensor) -> torch.Tensor:
@@ -408,12 +466,7 @@ class VDual(nn.Module):
         :return Tuple of losses and intermediates, as follows:
             > (combined loss, [reconstruction loss per frame in {0, K}])
         """
-        # First, get precomputed language embeddings & project to encoder_embed_dim; language only used in encoder!
-        lang_embeddings = self.encode_language(lang, lang_mask)
-        projected_language = self.lang2encoder(lang_embeddings)
-
-        # Reshape image context to apply masking *identically*
-        visible_ctx_patches, mask, restore_idxs = self.forward_encoder(imgs, projected_language, lang_mask, mask_ratio)
+        visible_ctx_patches, mask, restore_idxs = self.forward_encoder(imgs, lang, lang_mask, mask_ratio)
         ctx_reconstructions = self.forward_decoder(visible_ctx_patches, restore_idxs)
         zero_loss, k_loss = self.compute_loss(imgs, ctx_reconstructions, mask)
 

@@ -8,7 +8,7 @@ authors = [
     {name = "Siddharth Karamcheti", email="skaramcheti@cs.stanford.edu"}
 ]
 description = "Voltron: Language-Driven Representation Learning for Robotics."
-version = "1.0.3"
+version = "1.1.0"
 readme = "README.md"
 requires-python = ">=3.8"
 keywords = ["robotics", "representation learning", "natural language processing", "machine learning"]
@@ -29,18 +29,19 @@ classifiers = [
 ]
 dependencies = [
     "av",
+    "einops",
     "gdown",
     "google-cloud-storage",
-    "einops",
+    "h5py",
     "hurry.filesize",
-    "hydra-core==1.1.1", # Lock Hydra =>> future versions break...
+    "hydra-core==1.1.1",    # Lock Hydra =>> future versions break!
     "jsonlines",
-    "omegaconf==2.1.2",  # Lock OmegaConf =>> future versions break...
+    "omegaconf==2.1.2",     # Lock OmegaConf =>> future versions break!
     "opencv-python",
+    "pandas",
     "rich",
-    "torch",
-    "torchvision",
-    "torchaudio",
+    "torch>=2.0.0",         # Native PyTorch Code (Release 2.0.0) uses PyTorch 2.0!
+    "torchvision>=0.15.0",
     "transformers",
     "wandb",
 ]

@@ -24,30 +24,6 @@ from torch.utils.data.distributed import DistributedSampler
 T_co = TypeVar("T_co", covariant=True)
 
 
-def xla_available() -> bool:
-    try:
-        return find_spec("torch_xla") is not None
-    except ModuleNotFoundError:
-        return False
-
-
-def get_rank() -> int:
-    """Returns the global rank [0, World Size) of the current process."""
-    if xla_available():
-        import torch_xla.core.xla_model as xm
-
-        # By default, if XLA is available, assume we're running under XMP Spawn
-        return xm.get_ordinal()
-
-    # Try to get rank via torch.distributed, but catch error if only single process
-    try:
-        return torch.distributed.get_rank()
-
-    # RuntimeError => not running distributed (single process)
-    except RuntimeError:
-        return 0
-
-
 class ResumeableDistributedSampler(DistributedSampler):
     def __init__(
         self,
@@ -88,3 +64,27 @@ class ResumeableDistributedSampler(DistributedSampler):
         self.epoch = epoch
         if self.epoch != self.resume_epoch:
             self.do_resume = False
+
+
+def xla_available() -> bool:
+    try:
+        return find_spec("torch_xla") is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def get_rank() -> int:
+    """Returns the global rank [0, World Size) of the current process."""
+    if xla_available():
+        import torch_xla.core.xla_model as xm
+
+        # By default, if XLA is available, assume we're running under XMP Spawn
+        return xm.get_ordinal()
+
+    # Try to get rank via torch.distributed, but catch error if only single process
+    try:
+        return torch.distributed.get_rank()
+
+    # RuntimeError => not running distributed (single process)
+    except RuntimeError:
+        return 0

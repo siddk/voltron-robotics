@@ -4,7 +4,7 @@ tracking.py
 Base Hydra Structured Config for defining various run & experiment tracking configurations, e.g., via Weights & Biases.
 Uses a simple single inheritance structure.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from hydra.core.config_store import ConfigStore
@@ -13,6 +13,9 @@ from omegaconf import MISSING
 
 @dataclass
 class TrackingConfig:
+    # Active Loggers --> List of Loggers
+    active_loggers: List[str] = field(default_factory=lambda: ["jsonl", "wandb"])
+
     # Generic Logging Frequency --> Matters more for XLA/TPUs... set this to be as large as you can stomach!
     log_frequency: int = 100
 
