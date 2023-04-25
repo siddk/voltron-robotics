@@ -3,13 +3,13 @@ xpretrain.py
 
 (The `x` prefix indicates this is a script geared for XLA/TPU backends *only*)!
 
-Reference script for PyTorch XLA (TPU-based) pretraining on the non-Qualcomm version of Sth-Sth-v2; this is
+Reference script for PyTorch XLA (TPU-based) pretraining on the Something-Something-v2 dataset; this is
 mostly for completeness =>> the hope is that the regular `pretrain.py` script is more general and maintained.
 
 Focuses on multi-TPU (XLA) training --> but also supports single-core TPU training, as the default distributed mp.spawn
 behavior just collapses into a single thread! Loads and preprocesses dataset, instantiates a model, and runs training.
 
-Run with `python xpretrain.py` (will by default use the configuration specified by `DEFAULTS` below).
+Run with `python examples/xla-reference/xpretrain.py` (will use the configuration specified by `DEFAULTS` below).
 """
 import os
 import re
@@ -34,13 +34,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from voltron.conf import AcceleratorConfig, DatasetConfig, ModelConfig, TrackingConfig
+from voltron.datasets.v1.stream_datasets import get_epoch_datasets
 from voltron.models import VMVP, VR3M, VRN3M, VCond, VDual, VGen
 from voltron.overwatch import OverwatchRich
-from voltron.preprocessing.stream_datasets import get_epoch_datasets
-from voltron.util import set_global_seed
-from voltron.util.checkpointing import CheckpointSaver
-from voltron.util.distributed import ResumeableDistributedSampler
-from voltron.util.xla_logger import (
+from voltron.util.v1.checkpointing import XLACheckpointSaver
+from voltron.util.v1.distributed import ResumeableDistributedSampler
+from voltron.util.v1.random import set_global_seed
+from voltron.util.v1.xla_logger import (
     log_epoch_end_update,
     log_vcond_train_update,
     log_vdual_train_update,
@@ -377,7 +377,7 @@ def xpretrain(cfg: PretrainConfig) -> None:
             entity=cfg.tracking.entity,
             config=cfg,
             name=run_id,
-            dir=f"{os.getcwd()}" if cfg.tracking.dir is None else cfg.tracking.dir,
+            dir=f"{os.getcwd()}" if cfg.tracking.directory is None else cfg.tracking.directory,
             tags=tags,
             notes=cfg.tracking.notes,
             resume="allow" if start_checkpoint is not None else False,
@@ -446,7 +446,7 @@ def xpretrain(cfg: PretrainConfig) -> None:
         raise NotImplementedError(f"Trackers for Model `{cfg.model.arch}` not implemented!")
 
     # 0th Checkpoint - Pull out optimizer state explicitly (`groups` are not serializable & can easily be replicated)
-    saver = CheckpointSaver(cfg.tracking.checkpoint_strategy, run_dir, cfg.accelerator.accelerator)
+    saver = XLACheckpointSaver(cfg.tracking.checkpoint_strategy, run_dir, cfg.accelerator.accelerator)
     if start_checkpoint is None and start_epoch == 0:
         xm.master_print("Saving 0th Epoch Checkpoint...")
         saver.save(

@@ -24,8 +24,12 @@ class ModelConfig:
     patch_size: int = 16
     mlp_ratio: float = 4.0
 
+    # Effective batch size --> total number of examples before gradient update
+    effective_bsz: int = MISSING
+
     # Number of examples one can safely fit on an accelerator w/ this model!
-    device_bsz: int = MISSING
+    device_bsz: int = MISSING  # For backwards compatibility, only use device_bsz for XLA/TPU pretraining...
+    native_bsz: int = MISSING  # For backwards compatibility, define a separate `native_bsz`...
 
 
 # @Data-Locked Reproductions --- Encompasses MVP (MAE) + R3M
@@ -56,6 +60,7 @@ class MVPConfig(ModelConfig):
     norm_pixel_loss: bool = True
     effective_bsz: int = 1024
     device_bsz: int = MISSING
+    native_bsz: int = MISSING
 
     # Optimization Parameters
     optimizer: str = "adamw"
@@ -84,6 +89,7 @@ class MVPSmallConfig(MVPConfig):
     # Number of examples one can safely fit on an accelerator w/ this model!
     #   > TPU-v3: max of 128 per device.
     device_bsz = 128
+    native_bsz = 128
 
 
 # R3M Models --> Just different visual encoders, roughly following the above!
@@ -117,6 +123,7 @@ class R3MConfig(ModelConfig):
     l2_weight: float = 1e-5
     n_negatives: int = 3
     device_bsz: int = MISSING
+    native_bsz: int = MISSING
 
     # Optimization Parameters
     optimizer: str = "adam"
@@ -138,6 +145,7 @@ class R3MSmallConfig(R3MConfig):
 
     # Device Batch Size
     device_bsz = 32
+    native_bsz = 128
 
 
 # R3M -- ResNet50 Encoder (instead of ViT)
@@ -169,6 +177,7 @@ class ResNet3MConfig(ModelConfig):
     l2_weight: float = 1e-5
     n_negatives: int = 3
     device_bsz: int = MISSING
+    native_bsz: int = MISSING
 
     # Optimization Parameters
     optimizer: str = "adam"
@@ -183,6 +192,7 @@ class RN3M50Config(ResNet3MConfig):
 
     # Device Batch Size
     device_bsz = 32
+    native_bsz = 128
 
 
 # @Voltron Models -- VCond, VDual, VGen
@@ -216,10 +226,13 @@ class VCondConfig(ModelConfig):
     decoder_embed_dim: int = MISSING
     decoder_n_heads: int = MISSING
 
+    use_cls_token: bool = True
+
     # MAE Loss/Objective Configuration
     norm_pixel_loss: bool = True
     effective_bsz: int = 1024
     device_bsz: int = MISSING
+    native_bsz: int = MISSING
 
     # Optimization Parameters
     optimizer: str = "adamw"
@@ -250,7 +263,9 @@ class VCondSmallConfig(VCondConfig):
 
     # Number of examples one can safely fit on an accelerator w/ this model!
     #   > TPU-v3: max of 128 per device
+    #   > GPU w/ 32G of RAM: max of 128 per device!
     device_bsz = 128
+    native_bsz = 128
 
 
 @dataclass
@@ -274,7 +289,9 @@ class VCondBaseConfig(VCondConfig):
 
     # Number of examples one can safely fit on an accelerator w/ this model!
     #   > TPU-v3: max of 128 per device!
+    #   > GPU w/ 32G of RAM: max of 128 per device!
     device_bsz = 128
+    native_bsz = 128
 
 
 # VDual - Dual Frame (0th Frame + Kth frame) + Language Conditioning
@@ -306,10 +323,13 @@ class VDualConfig(ModelConfig):
     decoder_embed_dim: int = MISSING
     decoder_n_heads: int = MISSING
 
+    use_cls_token: bool = True
+
     # MAE Loss/Objective Configuration -- Cut effective batch size since we see 12-25x contexts per batch example!
     norm_pixel_loss: bool = True
     effective_bsz: int = 1024
     device_bsz: int = MISSING
+    native_bsz: int = MISSING
 
     # Optimization Parameters
     optimizer: str = "adamw"
@@ -340,7 +360,35 @@ class VDualSmallConfig(VDualConfig):
 
     # Number of examples one can safely fit on an accelerator w/ this model!
     #   > TPU-v3: max of 128 per device!
+    #   > GPU w/ 32G of RAM: max of 128 per device!
     device_bsz = 128
+    native_bsz = 128
+
+
+@dataclass
+class VDualBaseConfig(VDualConfig):
+    identifier = "v-dual-base"
+
+    # No language dropout...
+    lang_dropout = 0.0
+
+    # Architecture Parameters -- should match ViT Base Architecture to the letter!
+    #   Note: Base is defined in TIMM & Original MAE Repository:
+    #       > https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py#L723
+    #       > https://github.com/facebookresearch/mae/blob/main/models_mae.py#L223
+    encoder_depth = 12
+    encoder_embed_dim = 768
+    encoder_n_heads = 12
+
+    decoder_depth = 8
+    decoder_embed_dim = 512
+    decoder_n_heads = 16
+
+    # Number of examples one can safely fit on an accelerator w/ this model!
+    #   > TPU-v3: max of 128 per device!
+    #   > GPU w/ 32G of RAM: max of 64 per device!
+    device_bsz = 128
+    native_bsz = 64
 
 
 # VGen - Dual Frame with Language Conditioning AND Language Generation
@@ -373,10 +421,13 @@ class VGenConfig(ModelConfig):
     decoder_embed_dim: int = MISSING
     decoder_n_heads: int = MISSING
 
+    use_cls_token: bool = True
+
     # MAE Loss/Objective Configuration -- Cut effective batch size since we see 12-25x contexts per batch example!
     norm_pixel_loss: bool = True
     effective_bsz: int = 1024
     device_bsz: int = MISSING
+    native_bsz: int = MISSING
 
     # Optimization Parameters
     optimizer: str = "adamw"
@@ -407,7 +458,35 @@ class VGen50SmallConfig(VGenConfig):
 
     # Number of examples one can safely fit on an accelerator w/ this model!
     #   > TPU-v3: max of 64 per device!
+    #   > GPU w/ 32G of RAM: max of 64 per device!
     device_bsz = 64
+    native_bsz = 64
+
+
+@dataclass
+class VGen50BaseConfig(VGenConfig):
+    identifier = "v-gen-base"
+
+    # LM Parameters --> control % of examples that are for "language generation" (no conditioning)
+    gen_ratio = 0.50
+
+    # Architecture Parameters -- should match ViT Base Architecture to the letter!
+    #   Note: Base is defined in TIMM & Original MAE Repository:
+    #       > https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py#L723
+    #       > https://github.com/facebookresearch/mae/blob/main/models_mae.py#L223
+    encoder_depth = 12
+    encoder_embed_dim = 768
+    encoder_n_heads = 12
+
+    decoder_depth = 8
+    decoder_embed_dim = 512
+    decoder_n_heads = 16
+
+    # Number of examples one can safely fit on an accelerator w/ this model!
+    #   > TPU-v3: max of 32 per device!
+    #   > GPU w/ 32G of RAM: max of 32 per device!
+    device_bsz = 32
+    native_bsz = 32
 
 
 # Create a configuration group `model` and populate with the above...
@@ -430,6 +509,8 @@ cs.store(group="model", name="v-cond-base", node=VCondBaseConfig)
 
 # VDual
 cs.store(group="model", name="v-dual", node=VDualSmallConfig)
+cs.store(group="model", name="v-dual-base", node=VDualBaseConfig)
 
 # VGen
 cs.store(group="model", name="v-gen", node=VGen50SmallConfig)
+cs.store(group="model", name="v-gen-base", node=VGen50BaseConfig)

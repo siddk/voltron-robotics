@@ -16,15 +16,19 @@ from omegaconf import MISSING
 class DatasetConfig:
     name: str = MISSING
     path: str = MISSING
-    artifact_path: str = to_absolute_path("data/processed/sth-sth-v2")
+    artifact_path: str = MISSING
 
     # Streaming Parameters (assumes fully preprocessed dataset lives at `stream_prefix/...`)
+    #   =>> Deprecated as of `v2`
     stream: bool = True
     stream_prefix: str = "data/processed"
 
     # Dataset-Specific Parameters
     resolution: int = 224
     normalization: Tuple[Any, Any] = MISSING
+
+    # For preprocessing --> maximum size of saved frames (assumed square)
+    preprocess_resolution: int = MISSING
 
     # Validation Parameters
     n_val_videos: int = MISSING
@@ -58,12 +62,16 @@ class SthSthv2Config(DatasetConfig):
     # fmt: off
     name: str = "sth-sth-v2"
     path: str = to_absolute_path("data/raw/sth-sth-v2")
+    artifact_path: str = to_absolute_path("data/processed/sth-sth-v2")
 
     # Dataset Specific arguments
     normalization: Tuple[Any, Any] = (                              # Mean & Standard Deviation (default :: ImageNet)
         (0.485, 0.456, 0.406),
         (0.229, 0.224, 0.225),
     )
+
+    # Sth-Sth-v2 Videos have a fixed height of 240; we'll crop to square at this resolution!
+    preprocess_resolution: int = 240
 
     # Validation Parameters
     n_val_videos: int = 1000                                        # Number of Validation Clips (fast evaluation!)

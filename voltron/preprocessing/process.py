@@ -1,14 +1,13 @@
 """
 process.py
 
-Utility functions for serializing datasets in multiple passes, using multiprocessing for efficient parallelization.
-Exposes a three-phase sequence for preprocessing:
-    - Phase I: Read in raw videos (and language), serialize *all extracted* frames to a subdirectory for easy retrieval.
-    - Phase II: Given image paths and language, assemble language statistics & pre-tokenize for easy batching.
-    - Phase III: Given a total number of "conceivable epochs", create data-controlled "epoch" sets for each model.
+Utility functions for preprocessing large-scale video/vision-language datasets in multiple passes, using multiprocessing
+for parallelization. Exposes a three-phase sequence for preprocessing --> batching data:
+    - Phase I (`extract_frames`): Read in raw (video clip, language) pairs, extract and serialize *all frames* to disk.
 
-This script tries to be smart where it can, using multiprocessing.Pool in Phase I to speed-up the serialization
-process. It also tries to be somewhat safe & efficient, producing idempotent resumes.
+This script tries to be smart where it can, using multiprocessing.Pool in Phase I to speed up extraction; however, for
+larger datasets YMMV. You might consider extracting the relevant logic, and using tools like SLURM Job Arrays, AWS
+Lambda Functions, or GCP Cloud Run to "burst preprocess" data.
 """
 import json
 import logging
@@ -23,109 +22,109 @@ import torch
 from rich.progress import track
 from transformers import AutoTokenizer
 
-from voltron.preprocessing.transforms import get_pre_transform
-from voltron.preprocessing.utils import do_dry_run, precompute_epoch, process_video
+from voltron.preprocessing.core import do_dry_run, process_clip, serialize_epoch
+from voltron.preprocessing.transforms import get_preprocess_transform
 
 # Grab Logger
 overwatch = logging.getLogger(__file__)
 
 
-def preprocess_videos(
+def extract_frames(
     name: str,
     path: str,
-    artifact_path: str = "data/processed",
-    resolution: int = 224,
-    n_val_videos: int = 1000,
+    artifact_path: str,
+    preprocess_resolution: int,
+    n_val_videos: int,
     dry_run: bool = False,
 ) -> Tuple[Path, Path, Path, Path]:
-    """Phase I of Preprocessing :: Uses Multiprocessing to Read Videos & Serialize Frames."""
-    overwatch.info(f"Phase 1 Preprocessing :: Frame serializing videos for dataset `{name}`")
+    """Phase I: Extract and serialize *all frames* from video clips; uses multiprocessing to parallelize."""
+    overwatch.info(f"Phase 1 Preprocessing :: Extracting Frames for Dataset `{name}`")
 
+    # Overview of Return Values:
+    #   `t_registry` and `v_registry` =>> store mappings of "video id" -> {metadata}
+    #   `t_dir` and `v_dir` =>> store "processed data" (extracted frames)
+    t_dir, v_dir = Path(artifact_path) / name / "train", Path(artifact_path) / name / "val"
+    t_registry, v_registry = t_dir / "registry.json", v_dir / "registry.json"
+
+    # Short-Circuit
+    if t_registry.exists() and v_registry.exists():
+        return t_registry, v_registry, t_dir, v_dir
+
+    # Setup / Book-Keeping
+    os.makedirs(t_dir, exist_ok=True)
+    os.makedirs(v_dir, exist_ok=True)
+
+    # Retrieve "pre-serialization" frame transform --> we scale down video frames (*while preserving aspect ratios*)
+    #   and center crop each frame to `(preprocess_resolution, preprocess_resolution)`; saves on disk space (by a lot!)
+    preprocess_transform = get_preprocess_transform(name, preprocess_resolution=preprocess_resolution)
+
+    # Switch on dataset (`name`)
     if name == "sth-sth-v2":
-        # Overview of Return Values:
-        #   `t_registry` and `v_registry` =>> store mappings of "vid_id" -> {metadata}
-        #   `t_dir` and `v_dir` =>> store "processed data" (extracted frames)
-        t_dir, v_dir = Path(artifact_path) / name / "train", Path(artifact_path) / name / "val"
-        t_registry, v_registry = t_dir / "registry.json", v_dir / "registry.json"
-
-        # Short-Circuit / Cache Logic
-        if t_registry.exists() and v_registry.exists():
-            return t_registry, v_registry, t_dir, v_dir
-
-        # Setup / Book-Keeping
-        os.makedirs(t_dir, exist_ok=True)
-        os.makedirs(v_dir, exist_ok=True)
-
-        # Retrieve Image Transforms (pre-serialization, while running "offline" pass); we crop and scale once, so we're
-        #   not overdoing it on disk storage...
-        pre_transform = get_pre_transform(name, resolution=resolution)
-
-        # Open & Extract Video ID & Language Metadata
-        with open(Path(path) / "something-something-v2-train.json", "r") as f:
+        with open(Path(path) / "labels/train.json", "r") as f:
             annotations = json.load(f)
             train_ids, train_lang = [x["id"] for x in annotations], [x["label"] for x in annotations]
 
-        with open(Path(path) / "something-something-v2-validation.json", "r") as f:
+        with open(Path(path) / "labels/validation.json", "r") as f:
             annotations = json.load(f)[:n_val_videos]
             val_ids, val_lang = [x["id"] for x in annotations], [x["label"] for x in annotations]
 
-        # Do Dry-Run --> Single-Threaded!
-        if dry_run:
-            do_dry_run(
-                name,
-                path,
-                n_train_videos=1000,
-                n_val_videos=100,
-                train_ids=train_ids,
-                val_ids=val_ids,
-                pre_transform=pre_transform,
-            )
-
-        # Go Go Go =>> Iterate through all videos, dump all frames subject to the following structure:
-        #   |-> data/processed/sth-sth-v2/
-        #          |-> <split>/
-        #                 |-> <video-id>/frames<0...k>.jpg
-        # We'll track a single metadata file with the map of <video-id> : ("language", n_frames).
-        #   > To speed up the serialization, we'll use a multiprocessing.Pool and max out CPU workers
-        with mp.Pool(mp.cpu_count()) as pool:
-            for k, save, vids, langs in [("train", t_dir, train_ids, train_lang), ("val", v_dir, val_ids, val_lang)]:
-                overwatch.info(f"\tWriting `{k}` videos to disk...")
-
-                # Multiprocess!
-                process_fn, registration = partial(process_video, name, Path(path), save, pre_transform), {}
-                for key, value in track(
-                    pool.imap_unordered(process_fn, zip(vids, langs)),
-                    description=f"\t[*] Processing {k}...",
-                    total=len(vids),
-                    transient=True,
-                ):
-                    if key is not None:
-                        registration[key] = value
-
-                # Write Registration to Disk
-                with open(t_registry if k == "train" else v_registry, "w") as f:
-                    json.dump(registration, f)
-
-        # Return Paths...
-        return t_registry, v_registry, t_dir, v_dir
-
     else:
-        raise NotImplementedError(f"Preprocessing Pipeline for Dataset `{name}` not implemented!")
+        raise ValueError(f"Language/Metadata Extraction Pipeline for Dataset `{name}` not implemented!")
+
+    # Run Dry-Run (if specified) --> single-threaded for debugging
+    if dry_run:
+        do_dry_run(name, path, train_ids, val_ids, preprocess_transform)
+
+    # Otherwise =>> Iterate through all videos, dump all frames subject to the following structure:
+    #   |-> .../processed/something-something-v2/
+    #       |-> <split>/
+    #           |-> <video-id>/frames<0..k>.jpg
+    #
+    # We'll build a single metadata file with a mapping <video-id> : ("language", n_frames)
+    #   > To speed up serialization, we'll use a multiprocessing.Pool and max out CPU workers
+    with mp.Pool(mp.cpu_count()) as pool:
+        for k, save, vids, langs in [("train", t_dir, train_ids, train_lang), ("val", v_dir, val_ids, val_lang)]:
+            overwatch.info(f"\tWriting `{k}` videos to disk...")
+
+            # Spawn!
+            process_fn, registration = partial(process_clip, name, Path(path), save, preprocess_transform), {}
+            for key, value in track(
+                pool.imap_unordered(process_fn, zip(vids, langs)),
+                total=len(vids),
+                transient=True,
+            ):
+                if key is not None:
+                    registration[key] = value
+
+            # Write Registration to Disk
+            with open(t_registry if k == "train" else v_registry, "w") as f:
+                json.dump(registration, f)
+
+    # Return Paths to Registry & Extract Directories...
+    return t_registry, v_registry, t_dir, v_dir
 
 
 def preprocess_language(
-    name: str, train_registry: Path, val_registry: Path, max_lang_len: int, language_model: str, hf_cache: str
-) -> None:
-    """Phase II of Preprocessing :: Iterate through Language & Normalize/Tokenize to Max Length."""
-    overwatch.info(f"Phase 2 Preprocessing :: Normalizing & tokenizing language for dataset `{name}`")
+    name: str,
+    train_registry: Path,
+    val_registry: Path,
+    artifact_path: str,
+    max_lang_len: int,
+    language_model: str,
+    hf_cache: str,
+) -> Path:
+    """Phase II: Iterate through Language Captions/Narrations and Normalize/Tokenize (truncate/pad to max length)."""
+    overwatch.info(f"Phase 2 Preprocessing :: Normalizing & Tokenizing Language for Dataset `{name}`")
     t_index, v_index = train_registry.parent / "index.pt", val_registry.parent / "index.pt"
     t_json, v_json = train_registry.parent / "index.json", val_registry.parent / "index.json"
+    index_dir = Path(artifact_path) / name / "index"
+    os.makedirs(index_dir, exist_ok=True)
 
-    # Short-Circuit Logic
-    if (t_index.exists() and v_index.exists()) or (t_json.exists() and v_json.exists()):
-        return t_index, v_index
+    # Short-Circuit
+    if (index_dir / "train-language-index.json").exists() and (index_dir / "val-language-index.json").exists():
+        return index_dir
 
-    # Grab Language, Retaining Metadata for Building Index Structures...
+    # Grab Language --> retain metadata for building index structures!
     with open(train_registry, "r") as f:
         train_metadata = json.load(f)
         train = [(vid, train_metadata[vid]["language"], train_metadata[vid]) for vid in train_metadata]
@@ -149,90 +148,63 @@ def preprocess_language(
         # Compute a histogram of lengths
         hist = lengths.float().histc(bins=lengths.max()).int()
         overwatch.info(f"Histogram: {hist.numpy().tolist()}")
-        raise NotImplementedError("Compute max length and update dataset configuration!")
+        raise AssertionError("Compute max length and update dataset configuration!")
 
     # Otherwise, we've already set the maximum length, so let's use it!
-    else:
-        overwatch.info(f"\tTokenizing all language in dataset to maximum length `{max_lang_len}`")
-        encoded_language = tokenizer(
-            language, return_tensors="pt", max_length=max_lang_len, truncation=True, padding="max_length"
-        )
-        input_ids, attention_mask = encoded_language["input_ids"], encoded_language["attention_mask"]
-        train_input_ids, train_attention_mask = input_ids[: len(train)], attention_mask[: len(train)]
-        val_input_ids, val_attention_mask = input_ids[len(train) :], attention_mask[len(train) :]
+    overwatch.info(f"\tTokenizing all language in dataset to maximum length `{max_lang_len}`")
+    encoded_language = tokenizer(
+        language, return_tensors="pt", max_length=max_lang_len, truncation=True, padding="max_length"
+    )
+    input_ids, attention_mask = encoded_language["input_ids"], encoded_language["attention_mask"]
+    train_input_ids, train_attention_mask = input_ids[: len(train)], attention_mask[: len(train)]
+    val_input_ids, val_attention_mask = input_ids[len(train) :], attention_mask[len(train) :]
 
-        # Assertion, just to sanity check
-        assert len(val_input_ids) == len(val_attention_mask) == len(val), "Something went wrong tokenizing language..."
+    # Assertion, just to sanity check
+    assert len(val_input_ids) == len(val_attention_mask) == len(val), "Something went wrong tokenizing language..."
 
-        # Compute `index.pt` contents
-        overwatch.info("\tAssembling `train` and `val` index structures...")
-        train_pt = {
-            train[i][0]: {**train[i][2], **{"input_ids": train_input_ids[i], "attention_mask": train_attention_mask[i]}}
-            for i in range(len(train))
-        }
-        val_pt = {
-            val[i][0]: {**val[i][2], **{"input_ids": val_input_ids[i], "attention_mask": val_attention_mask[i]}}
-            for i in range(len(val))
-        }
+    # Compute `index.pt` contents
+    overwatch.info("\tAssembling `train` and `val` index structures...")
+    train_pt = {
+        train[i][0]: {**train[i][2], **{"input_ids": train_input_ids[i], "attention_mask": train_attention_mask[i]}}
+        for i in range(len(train))
+    }
+    val_pt = {
+        val[i][0]: {**val[i][2], **{"input_ids": val_input_ids[i], "attention_mask": val_attention_mask[i]}}
+        for i in range(len(val))
+    }
 
-        # Dump structures...
-        overwatch.info(f"Saving index structures to `{t_index}` and `{v_index}` respectively...")
-        torch.save(train_pt, t_index)
-        torch.save(val_pt, v_index)
-
-
-def jsonify_language(train_registry: Path, val_registry: Path) -> None:
-    """Phase 2.5 (Aggregation) :: XLA is weird, won't load torch.Tensors in Dataset; JSONify instead."""
-    overwatch.info("\tPhase 2 Aggregation :: JSONifying Language Index")
-    t_index, v_index = train_registry.parent / "index.pt", val_registry.parent / "index.pt"
-    t_json, v_json = train_registry.parent / "index.json", val_registry.parent / "index.json"
+    # Additionally dump JSON versions of the same --> downstream interpretability, XLA
+    overwatch.info("JSONifying both Train and Validation Language")
     train_json, val_json = {}, {}
-
-    # Short-Circuit Logic
-    if t_json.exists() and v_json.exists():
-        return
-
-    # Load Data, iterate through and "de-tensorize", while building up JSON symmetric structure...
-    train_data, val_data = torch.load(t_index), torch.load(v_index)
-    overwatch.info("JSONifying both Train and Validation")
-    for vid in track(train_data, description="Train Language...", transient=True):
+    for vid in track(train_pt, description="Train Language :: ", transient=True):
         train_json[vid] = {
-            "language": train_data[vid]["language"],
-            "n_frames": train_data[vid]["n_frames"],
-            "input_ids": train_data[vid]["input_ids"].numpy().tolist(),
-            "attention_mask": train_data[vid]["attention_mask"].numpy().tolist(),
-        }
-    for vid in track(val_data, description="Val Language...", transient=True):
-        val_json[vid] = {
-            "language": val_data[vid]["language"],
-            "n_frames": val_data[vid]["n_frames"],
-            "input_ids": val_data[vid]["input_ids"].numpy().tolist(),
-            "attention_mask": val_data[vid]["attention_mask"].numpy().tolist(),
+            "language": train_pt[vid]["language"],
+            "n_frames": train_pt[vid]["n_frames"],
+            "input_ids": train_pt[vid]["input_ids"].numpy().tolist(),
+            "attention_mask": train_pt[vid]["attention_mask"].numpy().tolist(),
         }
 
-    # Write Data to Disk
-    overwatch.info("Writing JSON Indices")
+    for vid in track(val_pt, description="Validation Language :: ", transient=True):
+        val_json[vid] = {
+            "language": val_pt[vid]["language"],
+            "n_frames": val_pt[vid]["n_frames"],
+            "input_ids": val_pt[vid]["input_ids"].numpy().tolist(),
+            "attention_mask": val_pt[vid]["attention_mask"].numpy().tolist(),
+        }
+
+    # Dump Structures...
+    overwatch.info(f"Saving Torch indices to `{t_index}` and `{v_index}` respectively...")
+    torch.save(train_pt, t_index)
+    torch.save(val_pt, v_index)
+
+    overwatch.info(f"Saving JSON indices to `{t_json}` and `{v_json}` respectively...")
     with open(t_json, "w") as f:
         json.dump(train_json, f)
 
     with open(v_json, "w") as f:
         json.dump(val_json, f)
 
-
-def index(train_registry: Path, val_registry: Path, name: str, artifact_path: str = "data/processed") -> Path:
-    """Phase 2.75 (Indexing) :: Pull out language.json & other `absolutely necessary` indices to separate directory."""
-    overwatch.info("\tPhase 2 Indexing :: Indexing Language & Registry Files =>> Extracting to Separate Directory")
-
-    # Create "index" directory...
-    index_dir = Path(artifact_path) / name / "index"
-    os.makedirs(index_dir, exist_ok=True)
-
-    # Short-Circuit Logic
-    if (index_dir / "train-language-index.json").exists() and (index_dir / "val-language-index.json").exists():
-        return index_dir
-
-    # Retrieve Language JSON indices (train & validation) & copy to new directory...
-    t_json, v_json = train_registry.parent / "index.json", val_registry.parent / "index.json"
+    # Pull relevant files out into their own `index` directory...
     shutil.copy(t_json, index_dir / "train-language-index.json")
     shutil.copy(v_json, index_dir / "val-language-index.json")
 
@@ -240,7 +212,6 @@ def index(train_registry: Path, val_registry: Path, name: str, artifact_path: st
 
 
 def unify_batches(
-    artifact_path: Path,
     name: str,
     train_registry: Path,
     val_registry: Path,
@@ -251,10 +222,10 @@ def unify_batches(
     max_epochs: int = 400,
     initial_final_alpha: float = 0.2,
 ) -> None:
-    """Phase III of Preprocessing :: Assemble Batches for *all models* for *all epochs* in a consistent manner."""
-    overwatch.info("Phase 3 Preprocessing :: Assembling Data-Equivalent Epochs for each Model Format")
+    """Phase III: Assemble "Data-Locked" Batches for *all models* for *all epochs* for consistency!"""
+    overwatch.info(f"Phase 3 Preprocessing :: Assembling *Data-Locked* Batches for Dataset `{name}`")
 
-    # Load Registry Files
+    # Load Registries
     with open(train_registry, "r") as f:
         train_registrations = json.load(f)
 
@@ -269,19 +240,19 @@ def unify_batches(
     # Assemble Tracking Data
     b_keys, unique_states = {b[0] for b in batch_formats}, set()
 
-    # Parse out all "state"-specific elements...
+    # Parse out all "state"-specific Elements...
     state_elements = [s for s in full_set_inputs if "state_" in s]
     do_initial, do_final = "state_initial" in state_elements, "state_final" in state_elements
     n_int = len(state_elements) - 2 if ("state_initial" in state_elements and "state_final" in state_elements) else 0
 
-    # Serialize Epochs to Disk
-    overwatch.info("\tSerializing epochs to json file, pointing to image paths on disk via a dictionary...")
+    # Serialize Epochs
+    overwatch.info("\tSerializing Epochs to JSON --> Storing mapping of Epoch -> Image Paths")
     for b in b_keys:
         os.makedirs(index_dir / b, exist_ok=True)
 
-    # We only write the validation epoch once --> held constant across _all_ of training!
-    overwatch.info("\tWriting Validation Epoch to Disk...")
-    val_epoch_idx, _, uniq_s = precompute_epoch(
+    # We only write the Validation Epoch once --> held constant across *all* of training!
+    overwatch.info("\tWriting Validation Epoch to Disk")
+    val_epoch_idx, _, uniq_s = serialize_epoch(
         index_dir,
         val_registrations,
         val_dir,
@@ -290,7 +261,7 @@ def unify_batches(
         do_final,
         initial_final_alpha,
         n_int,
-        0,
+        epoch=0,
         is_validation=True,
     )
 
@@ -301,27 +272,16 @@ def unify_batches(
     # Compute length of epochs --> CPU Count should be no higher...
     epochs, n_frames_per_epoch = list(range(max_epochs)), -1
 
-    # Load "existing" verification file (if possible)
-    overwatch.info("\tLoading batch verification file (if possible)...")
-    verified_batches = Path(artifact_path) / name / "verified-batches.json"
-    if verified_batches.exists():
-        with open(verified_batches, "r") as f:
-            missing_epochs_per_format = json.load(f)
-
-        # Set epochs list by taking union of missing epochs over formats...
-        epochs = sorted(list(set().union(*missing_epochs_per_format.values())))
-
-    # Dump the big objects into an mp.Manager() so that we can read efficiently from other workers...
-    overwatch.info("\tPlacing the Train Registry into Shared Memory...")
+    # Parallelize Train Epoch Serialization
+    overwatch.info("\tPlacing the Train Registry into Shared Memory")
     manager = mp.Manager()
     mg_registry = manager.dict(train_registrations)
 
-    with mp.Pool(4) as pool:
-        overwatch.info("\tWriting Train Batches per Epoch to Disk...")
-
-        # Create partial function for multiprocessing pool...
+    # Multiprocess --> the memory demands here are a bit higher, so limit workers by factor of 4
+    with mp.Pool(mp.cpu_count() // 4) as pool:
+        overwatch.info("\tWriting Train Batches per Epoch to Disk")
         precompute_fn = partial(
-            precompute_epoch,
+            serialize_epoch,
             index_dir,
             mg_registry,
             train_dir,
@@ -339,7 +299,6 @@ def unify_batches(
             unique_states |= uniq_s
             n_frames_per_epoch = n_frames
 
-    # Statistics only make sense on initial computation... should unify with code above!
+    # Dump Statistics (Note :: Only makes sense on "initial" computation --> uninterrupted!)
     overwatch.info(f"Train Uniqueness: {len(unique_states)} States & {len(mg_registry)} Utterances")
     overwatch.info(f"Final Statistics :: 1 Epoch has ~ {n_frames_per_epoch} Frames...")
-    overwatch.info("Preprocessing Complete!")

@@ -148,7 +148,7 @@ class VMVP(nn.Module):
         else:
             n_keep = int(n_patches * (1 - self.mask_ratio))
 
-        # Sample some noise of n_patches size, argsort to get shuffled IDs (keep small), argsort again to get "unshuffle"
+        # Sample some noise of n_patches size, argsort to get shuffled IDs (keep small), argsort again to "unshuffle"
         #   > For clarity -- argsort is an invertible transformation (if argsort `restore`, recovers `shuffle`)
         shuffle_idxs = torch.argsort(torch.rand(bsz, n_patches, device=patches.device), dim=1)
         restore_idxs = torch.argsort(shuffle_idxs, dim=1)
@@ -187,12 +187,8 @@ class VMVP(nn.Module):
         # Note: All of this code is taken near-verbatim from the MVP repository...
         #   > Ref: https://github.com/ir413/mvp/blob/master/mvp/backbones/vit.py#L30
         patches = self.patch2embed(img)
-        patches_pe = patches + self.encoder_pe[:, 1:, :]
-
-        # Add CLS Token
-        cls_token = self.cls_token + self.encoder_pe[:, :1, :]
-        cls_tokens = cls_token.expand(img.shape[0], -1, -1)
-        cls_patches = torch.cat([cls_tokens, patches_pe], dim=1)
+        cls_tokens = self.cls_token.expand(img.shape[0], -1, -1)
+        cls_patches = torch.cat([cls_tokens, patches]) + self.encoder_pe
 
         # Apply Transformer Blocks...
         for block in self.encoder_blocks:
@@ -228,13 +224,13 @@ class VMVP(nn.Module):
 
         # Add Mask Tokens to Sequence
         mask_tokens = self.mask_token.repeat(
-            projected_patches.shape[0], restore_idxs.shape[1] - visible_patches.shape[1], 1
+            projected_patches.shape[0], restore_idxs.shape[1] - visible_patches.shape[1] + 1, 1
         )
 
         # Remove & add back CLS Token as part of the "unshuffling"
         concatenated_patches = torch.cat([projected_patches[:, 1:, :], mask_tokens], dim=1)  # Skip CLS Token
         unshuffled_patches = torch.gather(
-            concatenated_patches, dim=1, index=restore_idxs[..., None].repeat(1, 1, projected_patches.shape[2])
+            concatenated_patches, dim=1, index=restore_idxs[..., None].repeat(1, 1, self.decoder_embed_dim)
         )
         cls_unshuffled_patches = torch.cat([projected_patches[:, :1, :], unshuffled_patches], dim=1)  # Add CLS Token
 

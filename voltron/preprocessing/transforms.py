@@ -1,88 +1,67 @@
 """
 transforms.py
 
-Default image/video transformations for various datasets.
+Default video/image transforms for Voltron preprocessing and training. Provides utilities for defining different scale
+and crop transformations on a dataset-specific basis.
+
+There are two key desiderata we ensure with the transforms:
+    - Aspect Ratio --> We *never* naively reshape images in a way that distorts the aspect ratio; we crop instead!
+    - Minimum Size --> We *never* upsample images; processing strictly reduces dimensionality!
 """
-from typing import Any, Tuple
+from functools import partial
+from typing import Any, Callable, List, Tuple
 
-import cv2
-import numpy as np
 import torch
-from torchvision.transforms import Compose, ConvertImageDtype, Lambda, Normalize
+from PIL import Image, ImageOps
+from torchvision.transforms import Compose, ConvertImageDtype, Lambda, Normalize, Resize
 
 
-# Definitions of Video Transformations (Reference: something-something-v2-baseline)
-class ComposeMix:
-    def __init__(self, transforms):
-        self.transforms = transforms
-
-    def __call__(self, imgs):
-        for transformation, scope in self.transforms:
-            if scope == "img":
-                for idx, img in enumerate(imgs):
-                    imgs[idx] = transformation(img)
-            elif scope == "vid":
-                imgs = transformation(imgs)
-            else:
-                raise ValueError("Please specify a valid transformation...")
-        return imgs
-
-
-class RandomCropVideo:
-    def __init__(self, size):
-        self.size = size
-
-    def __call__(self, imgs):
-        th, tw = self.size
-        h, w = imgs[0].shape[:2]
-        x1, y1 = np.random.randint(0, w - tw), np.random.randint(0, h - th)
-        for idx, img in enumerate(imgs):
-            imgs[idx] = img[y1 : y1 + th, x1 : x1 + tw]
-        return imgs
-
-
-class Scale:
-    def __init__(self, size):
-        self.size = size
-
-    def __call__(self, img):
-        return cv2.resize(img, tuple(self.size))
-
-
-def get_pre_transform(dataset: str, resolution: int, scale_factor: float = 1.1) -> ComposeMix:
-    """Defines a `pre` transform to be applied *when serializing the images* (first pass)."""
-    if dataset == "sth-sth-v2":
-        if scale_factor > 1:
-            transform = ComposeMix(
-                [
-                    [Scale((int(resolution * scale_factor), int(resolution * scale_factor))), "img"],
-                    [RandomCropVideo((resolution, resolution)), "vid"],
-                ]
-            )
-        else:
-            transform = ComposeMix(
-                [
-                    [Scale((int(resolution * scale_factor), int(resolution * scale_factor))), "img"],
-                ]
-            )
-
-        return transform
-    else:
-        raise NotImplementedError(f"(Pre) transforms for dataset `{dataset}` not yet implemented!")
-
-
-def identity(x):
-    """Transform needs to be pickleable for multiprocessing.spawn()."""
+# Simple Identity Function --> needs to be top-level/pickleable for mp/distributed.spawn()
+def identity(x: torch.Tensor) -> torch.Tensor:
     return x.float()
 
 
-def get_online_transform(dataset: str, model_arch: str, normalization: Tuple[Any, Any]) -> Compose:
-    """Defines an `online` transform to be applied *when batching the images* (during training/validation)."""
-    if dataset == "sth-sth-v2":
+def scaled_center_crop(target_resolution: int, frames: List[Image.Image]) -> Image.Image:
+    # Assert width >= height and height >= target_resolution
+    orig_w, orig_h = frames[0].size
+    assert orig_w >= orig_h >= target_resolution
+
+    # Compute scale factor --> just a function of height and target_resolution
+    scale_factor = target_resolution / orig_h
+    for idx in range(len(frames)):
+        frames[idx] = ImageOps.scale(frames[idx], factor=scale_factor)
+        left = (frames[idx].size[0] - target_resolution) // 2
+        frames[idx] = frames[idx].crop((left, 0, left + target_resolution, target_resolution))
+
+    # Return "scaled and squared" images
+    return frames
+
+
+def get_preprocess_transform(
+    dataset_name: str, preprocess_resolution: int
+) -> Callable[[List[Image.Image]], List[Image.Image]]:
+    """Returns a transform that extracts square crops of `preprocess_resolution` from videos (as [T x H x W x C])."""
+    if dataset_name == "sth-sth-v2":
+        return partial(scaled_center_crop, preprocess_resolution)
+    else:
+        raise ValueError(f"Preprocessing transform for dataset `{dataset_name}` is not defined!")
+
+
+def get_online_transform(
+    dataset_name: str, model_arch: str, online_resolution: int, normalization: Tuple[Any, Any]
+) -> Compose:
+    """Returns an "online" torchvision Transform to be applied during training (batching/inference)."""
+    if dataset_name == "sth-sth-v2":
         # Note: R3M does *not* expect normalized 0-1 (then ImageNet normalized) images --> drop the identity.
         if model_arch in {"v-r3m", "v-rn3m"}:
-            return Compose([Lambda(identity)])
+            return Compose([Resize((online_resolution, online_resolution), antialias=True), Lambda(identity)])
         else:
-            return Compose([ConvertImageDtype(torch.float), Normalize(mean=normalization[0], std=normalization[1])])
+            return Compose(
+                [
+                    Resize((online_resolution, online_resolution), antialias=True),
+                    ConvertImageDtype(torch.float),
+                    Normalize(mean=normalization[0], std=normalization[1]),
+                ]
+            )
     else:
-        raise NotImplementedError(f"(Online) transforms for dataset `{dataset} not yet implemented!")
+        raise ValueError(f"Online Transforms for Dataset `{dataset_name}` not implemented!")

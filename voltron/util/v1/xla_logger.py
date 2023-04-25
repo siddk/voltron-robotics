@@ -82,7 +82,7 @@ def log_vmvp_train_update(
         f"Epoch {epoch:03d}, Global Step {global_step:06d} || LR :: {lr:.6f} -- Train Loss :: {train_loss:.4f}"
     )
 
-    # Log ot Weights & Biases + JSONL
+    # Log to Weights & Biases + JSONL
     blob = {
         "Pretrain/Step": global_step,
         "Pretrain/Epoch": epoch,

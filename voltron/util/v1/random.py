@@ -18,7 +18,7 @@ from typing import Callable
 import numpy as np
 import torch
 
-from voltron.util.distributed import get_rank
+from voltron.util.v1.distributed import get_rank
 
 
 def set_global_seed(seed: int) -> Callable[[int], None]:

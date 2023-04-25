@@ -7,7 +7,7 @@ loads from the corresponding "batch" serialized files, that define the exact dat
 Notably, these serialized files control exactly what data is seen by *all* methods **across epochs.** Using them is
 fairly critical to reproducibility & fair comparison.
 
-This specific file contains logic for a "streaming" DataLoader; data is fetched (within the dataloader, by each
+This specific file contains logic for a "streaming" Dataset; data is fetched (within the dataloader, by each
 worker) via an open connection over the network to a GCS bucket, materializing data as raw BytesIO objects fed to
 PIL.Image constructors.
 """
@@ -29,7 +29,7 @@ from torchvision.io import read_image
 from torchvision.transforms import Compose
 from torchvision.transforms.functional import pil_to_tensor
 
-from voltron.preprocessing.transforms import get_online_transform
+from voltron.preprocessing.v1.transforms import get_online_transform
 from voltron.util.distributed import get_rank
 
 # NOTE --> IF STREAMING JPEGS, WE NEED TO USE PILLOW TO READ FILES (w/o extracting locally...)
