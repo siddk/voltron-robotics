@@ -5,7 +5,7 @@
 <div align="center">
 
 [![arXiv](https://img.shields.io/badge/arXiv-2302.12766-df2a2a.svg?style=for-the-badge)](https://arxiv.org/abs/2302.12766)
-[![PyTorch](https://img.shields.io/badge/PyTorch-1.12.0-EE4C2C.svg?style=for-the-badge&logo=pytorch)](https://pytorch.org/get-started/previous-versions/#v1120)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0.0-EE4C2C.svg?style=for-the-badge&logo=pytorch)](https://pytorch.org/get-started/locally/)
 [![Code Style: Black](https://img.shields.io/badge/Code%20Style-Black-000000?style=for-the-badge)](https://github.com/psf/black)
 [![Ruff](https://img.shields.io/badge/%E2%9A%A1%EF%B8%8F-Ruff-orange?style=for-the-badge)](https://github.com/charliermarsh/ruff)
 ![License](https://img.shields.io/github/license/siddk/lila?color=blueviolet&style=for-the-badge)
@@ -29,8 +29,8 @@ you install the desired version (e.g., with accelerator support) for your given 
 manager (e.g., `conda`).
 
 PyTorch installation instructions [can be found here](https://pytorch.org/get-started/locally/). This repository
-should work with PyTorch >= 1.12, but has only been thoroughly tested with PyTorch 1.12.0, Torchvision 0.13.0,
-Torchaudio 0.12.0.
+should work with PyTorch >= 1.12. Releases before 1.1.0 have been thoroughly tested with PyTorch 1.12.0,
+Torchvision 0.13.0, and Torchaudio 0.12.0. **Note**: Releases 1.1.0 and after *assume PyTorch 2.0*!
 
 Once PyTorch has been properly installed, you can install this package via PyPI, and you're off!
 
