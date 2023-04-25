@@ -1,48 +1,55 @@
 """
 utils.py
 
-Preprocessing utilities, including functions for dry-runs and processing a single video (helpers for multiprocessing
-calls down the lines).
+Preprocessing utilities, including dry-run and single-video (single-example) processing. This file effectively defines
+the "atomic" logic (take one video --> extract all frames, etc.), while the `process.py` functions invoke each unit
+in a multiprocessing pool.
 """
 import glob
 import json
 import logging
 import os
-import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import av
-import cv2
+import h5py
 import numpy as np
+import pandas as pd
 from hurry.filesize import alternative, size
+from PIL import Image
 from rich.progress import track
 from tqdm import tqdm
-
-from voltron.preprocessing.transforms import ComposeMix
 
 # Grab Logger
 overwatch = logging.getLogger(__file__)
 logging.getLogger("libav").setLevel(logging.ERROR)
 
 
-# Videos are saved as `train_dir/{vid}/{vid}_idx={i}.jpg
-def get_path(save_dir: Path, v: str, i: int) -> str:
-    return str(save_dir / v / f"{v}_idx={i}.jpg")
+# === General Utilities ===
+
+
+# Videos are saved as `train_dir/{vid}/{vid}_idx={i}.jpg || if `relpath` then *relative path* `{split}/{vid}/...
+def get_path(save_dir: Path, v: str, i: int, relpath: bool = False) -> str:
+    return str((save_dir if not relpath else Path(save_dir.name)) / v / f"{v}_idx={i}.jpg")
+
+
+# === Dry-Run Functionality ===
 
 
 def do_dry_run(
     name: str,
     path: str,
-    n_train_videos: int,
-    n_val_videos: int,
     train_ids: List[str],
     val_ids: List[str],
-    pre_transform: ComposeMix,
+    preprocess_transform: Callable[[List[Image.Image]], List[Image.Image]],
+    n_train_videos: int = 1000,
+    n_val_videos: int = 100,
     n_samples: int = 1000,
 ) -> None:
     """Iterates through a small subset of the total dataset, logs n_frames & average image size for estimation."""
+    overwatch.info(f"Performing Dry-Run with {n_train_videos} Train Videos and {n_val_videos} Validation Videos")
     dry_run_metrics = {
         "n_frames": [],
         "jpg_sizes": [],
@@ -50,38 +57,38 @@ def do_dry_run(
         "time_per_example": [],
         "blank": str(Path(path) / "blank.jpg"),
     }
+
+    # Switch on dataset (`name`)
     if name == "sth-sth-v2":
         for k, n_iter, vids in [("train", n_train_videos, train_ids), ("val", n_val_videos, val_ids)]:
             for idx in track(range(n_iter), description=f"Reading {k.capitalize()} Videos =>> ", transient=True):
-                vid = vids[idx]
-                container = av.open(str(Path(path) / "videos" / f"{vid}.webm"))
+                container = av.open(str(Path(path) / "videos" / f"{vids[idx]}.webm"))
+                assert int(container.streams.video[0].average_rate) == 12, "FPS for `sth-sth-v2` should be 12!"
                 try:
-                    imgs = [f.to_rgb().to_ndarray() for f in container.decode(video=0)]
+                    imgs = [f.to_image() for f in container.decode(video=0)]
                 except (RuntimeError, ZeroDivisionError) as e:
-                    overwatch.error(f"{type(e).__name__}: WebM reader cannot open `{vid}.webm` - continuing...")
+                    overwatch.error(f"{type(e).__name__}: WebM reader cannot open `{vids[idx]}.webm` - continuing...")
                     continue
-
-                # Close container
                 container.close()
 
-                # Apply `pre_transform`
-                imgs = pre_transform(imgs)
+                # Apply `preprocess_transform`
+                imgs = preprocess_transform(imgs)
 
                 # Dry-Run Handling --> write a dummy JPEG to collect size statistics, dump, and move on...
                 dry_run_metrics["n_frames"].append(len(imgs))
                 while dry_run_metrics["n_samples"] > 0 and len(imgs) > 0:
                     img = imgs.pop(0)
-                    cv2.imwrite(str(dry_run_metrics["blank"]), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+                    img.save(str(dry_run_metrics["blank"]))
                     dry_run_metrics["jpg_sizes"].append(os.path.getsize(dry_run_metrics["blank"]))
                     dry_run_metrics["n_samples"] -= 1
 
-        # Compute nice totals for "dry-run" estimation
+        # Compute nice totals for "dry-run" estimate...
         total_clips = len(train_ids) + len(val_ids)
 
     else:
-        raise NotImplementedError(f"Dry Run for Dataset `{name}` not yet implemented!")
+        raise ValueError(f"Dry Run for Dataset `{name}` not implemented!")
 
-    # Compute Aggregate Statistics and gently exit...
+    # Compute aggregate statistics and gently exit...
     avg_size, avg_frames = np.mean(dry_run_metrics["jpg_sizes"]), int(np.mean(dry_run_metrics["n_frames"]))
     overwatch.info("Dry-Run Statistics =>>")
     overwatch.info(f"\t> A video has on average `{avg_frames}` frames at {size(avg_size, system=alternative)}")
@@ -94,48 +101,53 @@ def do_dry_run(
 
     # Remove dummy file...
     os.remove(dry_run_metrics["blank"])
-    sys.exit(0)
+    exit(0)
 
 
-def process_video(
-    name: str, path: Path, save: Path, pre_transform: ComposeMix, item: Tuple[str, str]
+# === Atomic "Processing" Steps ===
+
+
+def process_clip(
+    name: str,
+    path: Path,
+    save: Path,
+    preprocess_transform: Callable[[List[Image.Image]], List[Image.Image]],
+    item: Tuple[str, str],
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """Processes a single video file, dumps to series of image files, and returns the registry contents."""
+    """Processes a single video clip and extracts/serializes all frames (as jpeg), returning the registry contents."""
     if name == "sth-sth-v2":
-        # For sth-sth-v2, `item` corresponds to a single video clip, so just a tuple!
         vid, lang = item
         container, registration = av.open(str(Path(path) / "videos" / f"{vid}.webm")), {"language": lang, "n_frames": 0}
+        assert int(container.streams.video[0].average_rate) == 12, "FPS for `sth-sth-v2` should be 12!"
         try:
-            imgs = [f.to_rgb().to_ndarray() for f in container.decode(video=0)]
+            imgs = [f.to_image() for f in container.decode(video=0)]
         except (RuntimeError, ZeroDivisionError) as e:
-            overwatch.error(f"{type(e).__name__}: WebM reader cannot open `{vid}.webm` - skipping...")
+            overwatch.error(f"{type(e).__name__}: WebM reader cannot open `{vid}.webm` - continuing...")
             return None, None
-
-        # Close container
         container.close()
 
-        # Book-keeping
+        # Book-Keeping
         os.makedirs(save / vid, exist_ok=True)
         registration["n_frames"] = len(imgs)
 
-        # Early exit (writes are expensive)
+        # Short Circuit --> Writes are Expensive!
         if len(glob.glob1(save / vid, "*.jpg")) == len(imgs):
             return vid, registration
 
-        # Apply `pre_transform` --> write individual frames, register, and return
-        imgs = pre_transform(imgs)
-        for i in range(len(imgs)):
-            cv2.imwrite(get_path(save, vid, i), cv2.cvtColor(imgs[i], cv2.COLOR_RGB2BGR))
+        # Apply `preprocess_transform` --> write individual frames, register, and move on!
+        imgs = preprocess_transform(imgs)
+        for idx in range(len(imgs)):
+            imgs[idx].save(get_path(save, vid, idx))
 
         # Return title & registration
         return vid, registration
 
     else:
-        raise NotImplementedError(f"Process Video for Dataset `{name}` not yet implemented!")
+        raise ValueError(f"Clip Processing for Dataset `{name}` is not implemented!")
 
 
 # ruff: noqa: C901
-def precompute_epoch(
+def serialize_epoch(
     index_dir: Path,
     registry: Dict[str, Any],
     vid_dir: Path,
@@ -148,6 +160,7 @@ def precompute_epoch(
     is_validation: bool = False,
 ) -> Tuple[int, int, Optional[Set[str]]]:
     index_file = "validation-batches.json" if is_validation else f"train-epoch={epoch}-batches.json"
+    index_hdf5 = "validation-batches.hdf5" if is_validation else f"train-epoch={epoch}-batches.hdf5"
 
     # Short-Circuit
     if all([(index_dir / key / index_file).exists() for key, _ in batch_formats]):
@@ -159,7 +172,7 @@ def precompute_epoch(
     # Create Tracking Variables
     unique_states, batches = set(), {b: [] for b, _ in batch_formats}
 
-    # Iterate through Registry...
+    # Iterate through Registry --> Note we're using `tqdm` instead of `track` here because of `position` feature!
     for vid in tqdm(registry.keys(), desc=f"Epoch {epoch}", total=len(registry), position=epoch):
         # The initial/final states are sampled from the first [0, \alpha) and final 1-\alpha, 1] percent of the video
         n_frames = registry[vid]["n_frames"]
@@ -178,7 +191,7 @@ def precompute_epoch(
         sampled_idxs = sorted(list(sampled_idxs))
 
         # Compile full-set "batch"
-        retrieved_states = [get_path(vid_dir, vid, x) for x in [initial_idx, *sampled_idxs] + [final_idx]]
+        retrieved_states = [get_path(vid_dir, vid, x, relpath=True) for x in [initial_idx, *sampled_idxs] + [final_idx]]
 
         # Add batch to index for specific batch_format key...
         batches[batch_formats[-1][0]].append({"vid": vid, "states": retrieved_states, "n_frames": n_frames})
@@ -214,5 +227,27 @@ def precompute_epoch(
     for key in batches:
         with open(index_dir / key / index_file, "w") as f:
             json.dump(batches[key], f)
+
+    # Write HDF5 Index directly to disk...
+    for key, elements in batch_formats[:-1]:
+        n_states = len([x for x in elements if "state_" in x])
+
+        # Create HDF5 File
+        df = pd.DataFrame(batches[key])
+        h5 = h5py.File(index_dir / key / index_hdf5, "w")
+        for k in ["vid", "n_frames"]:
+            h5.create_dataset(k, data=df[k].values)
+
+        # Handle "state(s)" --> (image path strings) --> add leading dimension (`n_states`)
+        if n_states == 1:
+            dfs = df["state"].apply(pd.Series)
+            h5.create_dataset("states", data=dfs.values)
+
+        else:
+            dfs = df["states"].apply(pd.Series)
+            h5.create_dataset("states", data=dfs.values)
+
+        # Close HDF5 File
+        h5.close()
 
     return epoch, len(batches["state"]), unique_states

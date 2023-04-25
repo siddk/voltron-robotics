@@ -1,10 +1,12 @@
 """
-adapt.py
+usage.py
 
 Example script demonstrating how to load a Voltron model (`V-Cond`) and instantiate a Multiheaded Attention Pooling
 extractor head for downstream tasks.
 
 This is the basic formula/protocol for using Voltron for arbitrary downstream applications.
+
+Run with (from root of repository): `python examples/usage.py`
 """
 import torch
 from torchvision.io import read_image
@@ -12,8 +14,8 @@ from torchvision.io import read_image
 from voltron import instantiate_extractor, load
 
 
-def adapt() -> None:
-    print("[*] Running `adapt` => Demonstrating Voltron for Various Adaptation Applications")
+def usage() -> None:
+    print("[*] Demonstrating Voltron Usage for Various Adaptation Applications")
 
     # Get `torch.device` for loading model (note -- we'll load weights directly onto device!)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -31,8 +33,8 @@ def adapt() -> None:
         visual_features = vcond(img, mode="visual")  # Vision-only features (no language)
 
     # Can instantiate various extractors for downstream applications
-    vector_extractor = instantiate_extractor(vcond, n_latents=1)()
-    seq_extractor = instantiate_extractor(vcond, n_latents=64)()
+    vector_extractor = instantiate_extractor(vcond, n_latents=1, device=device)()
+    seq_extractor = instantiate_extractor(vcond, n_latents=64, device=device)()
 
     # Assertions...
     assert list(vector_extractor(multimodal_features).shape) == [1, vcond.embed_dim], "Should return a dense vector!"
@@ -40,4 +42,4 @@ def adapt() -> None:
 
 
 if __name__ == "__main__":
-    adapt()
+    usage()

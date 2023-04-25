@@ -39,7 +39,7 @@ class OverwatchRich:
         }
     )
     root: Dict[str, Any] = field(default_factory=lambda: {"level": "INFO", "handlers": ["console", "file"]})
-    disable_existing_loggers: bool = False
+    disable_existing_loggers: bool = True
 
 
 # Standard Overwatch Variant --> Performant, no bells & whistles
@@ -58,4 +58,4 @@ class OverwatchStandard:
         }
     )
     root: Dict[str, Any] = field(default_factory=lambda: {"level": "INFO", "handlers": ["console", "file"]})
-    disable_existing_loggers: bool = False
+    disable_existing_loggers: bool = True

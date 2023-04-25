@@ -139,6 +139,7 @@ dmypy.json
 .DS_Store
 
 # Cache
+data/
 cache/
 
 # Scratch

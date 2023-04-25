@@ -1,10 +1,11 @@
 """
-xpreprocess.py
+preprocess.py
 
-Centralized script for preprocessing Sth-Sth-v2 for TPU/GCP pretraining, using a multi-stage, multiprocessing strategy.
+Centralized script for preprocessing various video/vision-language datasets for GPU pretraining, using a multi-stage,
+multiprocessing approach.
 
-Run as a standalone script, *prior* to calling `xpretrain.py` =>> mostly because we want to preprocess the data
-once, as a fixed cost.
+Run as a standalone script, *prior* to calling `pretrain.py` =>> mostly because we want to preprocess the data once, as
+a fixed cost.
 """
 import logging
 from dataclasses import dataclass, field
@@ -16,8 +17,8 @@ from omegaconf import MISSING
 
 from voltron.conf import DatasetConfig
 from voltron.overwatch import OverwatchRich
-from voltron.preprocessing.v1 import index, jsonify_language, preprocess_language, preprocess_videos, unify_batches
-from voltron.util.v1.random import set_global_seed
+from voltron.preprocessing import extract_frames, preprocess_language, unify_batches
+from voltron.util import set_global_seed
 
 # Grab Logger
 overwatch = logging.getLogger(__file__)
@@ -51,48 +52,48 @@ cs.store(name="config", node=PreprocessingConfig)
 
 
 @hydra.main(config_path=None, config_name="config")
-def xpreprocess(cfg: PreprocessingConfig) -> None:
+def preprocess(cfg: PreprocessingConfig) -> None:
     overwatch.info("Preprocessing :: Running Phases for Frame Extraction, Language Compilation, and Batching...")
 
     # Set Randomness
     set_global_seed(cfg.seed)
 
-    # Phase 1 :: Serialize Frames from Video Clips --> Get `registry` for train and val (index structure)
-    train_registry, val_registry, train_dir, val_dir = preprocess_videos(
+    # Phase 1 :: Serialize Frames from Video Clips --> get `registry` (index files) for train and validation
+    train_registry, val_registry, train_dir, val_dir = extract_frames(
         cfg.dataset.name,
         path=cfg.dataset.path,
         artifact_path=cfg.dataset.artifact_path,
-        resolution=cfg.dataset.resolution,
+        preprocess_resolution=cfg.dataset.preprocess_resolution,
         n_val_videos=cfg.dataset.n_val_videos,
         dry_run=cfg.dry_run,
     )
 
-    # Phase 2 :: Normalize & Tokenize Language  --> Create `index.pt` & `index.json` files
-    preprocess_language(
+    # Phase 2 :: Normalize & Tokenize Language --> create `index.pt` and `index.json` files
+    index_dir = preprocess_language(
         cfg.dataset.name,
         train_registry,
         val_registry,
+        artifact_path=cfg.dataset.artifact_path,
         max_lang_len=cfg.dataset.max_lang_len,
         language_model=cfg.dataset.language_model,
         hf_cache=cfg.dataset.hf_cache,
     )
-    jsonify_language(train_registry, val_registry)
-    index_dir = index(train_registry, val_registry, cfg.dataset.name, artifact_path=cfg.dataset.artifact_path)
 
-    # Phase 3 :: Assemble & Unify Batch "Sets" across the Varied Dataset Formats (for each Model =>> "data-locked")
+    # Phase 3 :: Assemble "Data-Locked" Batch Sets for Various Models (e.g., for single-frame/dual-frame/quintet)
     unify_batches(
-        cfg.dataset.artifact_path,
         cfg.dataset.name,
         train_registry,
         val_registry,
         train_dir,
         val_dir,
         index_dir,
-        cfg.dataset.batch_formats,
+        batch_formats=cfg.dataset.batch_formats,
         max_epochs=cfg.dataset.max_epochs,
         initial_final_alpha=cfg.dataset.initial_final_alpha,
     )
 
+    overwatch.info("Preprocessing Complete!")
+
 
 if __name__ == "__main__":
-    xpreprocess()
+    preprocess()

@@ -5,6 +5,8 @@ Example script demonstrating how to load all Voltron models (and reproduced mode
 various (e.g., multimodal, image-only) representations.
 
 Also serves to verify that representation loading is working as advertised.
+
+Run with (from root of repository): `python examples/verification/verify.py`
 """
 import torch
 from torchvision.io import read_image
@@ -15,7 +17,7 @@ from voltron import load
 MODELS = ["v-cond", "v-dual", "v-gen", "r-mvp", "r-r3m-vit", "r-r3m-rn50"]
 
 # Sample Inputs
-IMG_A, IMG_B = "examples/img/peel-carrot-initial.png", "examples/img/peel-carrot-final.png"
+IMG_A, IMG_B = "examples/verification/img/peel-carrot-initial.png", "examples/verification/img/peel-carrot-final.png"
 LANGUAGE = "peeling a carrot"
 
 
