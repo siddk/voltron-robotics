@@ -169,3 +169,18 @@ High-level overview of repository/project file-tree:
 + `pyproject.toml` - Following PEP 621, this file has all project configuration details (including dependencies), as
                      well as tool configurations (for `black` and `ruff`).
 + `README.md` - You are here!
+
+---
+
+## Citation
+
+Please cite [our paper](https://arxiv.org/abs/2302.12766) if using any of the Voltron models, evaluation suite, or other parts of our framework in your work.
+
+```bibtex
+@inproceedings{karamcheti2023voltron,
+  title={Language-Driven Representation Learning for Robotics},
+  author={Siddharth Karamcheti and Suraj Nair and Annie S. Chen and Thomas Kollar and Chelsea Finn and Dorsa Sadigh and Percy Liang},
+  booktitle={Robotics: Science and Systems (RSS)},
+  year={2023}
+}
+```
